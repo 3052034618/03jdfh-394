@@ -94,8 +94,28 @@ export interface BatchImportResult {
   added: number;
   skipped: number;
   failed: number;
+  unparsed: Array<{ line: string; message: string }>;
   recoveredTrees: number;
-  details: Array<{ code: string; status: 'added' | 'skipped' | 'failed'; message?: string }>;
+  affectedTopicIds: string[];
+  affectedTreeIds: string[];
+  details: Array<{
+    code: string;
+    status: 'added' | 'skipped' | 'failed';
+    message?: string;
+    topicId?: string;
+    treeId?: string;
+    reviewerName?: string;
+  }>;
+}
+
+export interface ImportCodeResult {
+  code: string;
+  status: 'added' | 'skipped' | 'failed';
+  message: string;
+  topicId?: string;
+  treeId?: string;
+  reviewerName?: string;
+  treeRecovered?: boolean;
 }
 
 export interface NodeFearRanking {
@@ -104,6 +124,8 @@ export interface NodeFearRanking {
   actType: ActType;
   markCount: number;
   reviewerNames: string[];
+  treeId: string;
+  authorName: string;
 }
 
 export interface TreeFeedbackAggregate {

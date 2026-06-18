@@ -2,9 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '@/store';
 import type { DialogueTree, DialogueNode, PlaybackMode, FearMark, FeedbackCode, PlaybackFeedback } from '@/types';
-import { ACT_LABELS } from '@/types';
 import { generateId, decodeTreeFromUrl, encodeFeedbackCode, buildFeedbackCode, decodeFeedbackCode } from '@/utils';
-import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye, Copy, Check, User, Share2 } from 'lucide-react';
+import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye, Copy, Check, User, Share2, CheckCircle, GraduationCap } from 'lucide-react';
 
 interface DisplayItem {
   type: 'node' | 'player-choice';
@@ -19,14 +18,14 @@ interface DisplayItem {
 export default function PlaybackPage() {
   const { id: treeId } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const store = useStore();
 
   const [tree, setTree] = useState<DialogueTree | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [mode, setMode] = useState<PlaybackMode>('chat');
   const [showStats, setShowStats] = useState(false);
-  const [showFeedbackBanner, setShowFeedbackBanner] = useState<string | null>(null);
+  const [showFeedbackBanner, setShowFeedbackBanner] = useState<'success' | null>(null);
 
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [visitedNodeIds, setVisitedNodeIds] = useState<string[]>([]);
@@ -44,6 +43,10 @@ export default function PlaybackPage() {
   const [copiedLink, setCopiedLink] = useState(false);
   const [feedbackLink, setFeedbackLink] = useState('');
   const [isSharedTree, setIsSharedTree] = useState(false);
+  const [bannerReviewerName, setBannerReviewerName] = useState('');
+  const [bannerMarkCount, setBannerMarkCount] = useState(0);
+  const [bannerTopicId, setBannerTopicId] = useState('');
+  const [bannerTreeId, setBannerTreeId] = useState('');
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -130,20 +133,19 @@ export default function PlaybackPage() {
     }
 
     if (feedbackParam) {
-      const decodedFb = decodeFeedbackCode(feedbackParam);
-      if (decodedFb) {
-        const fbToAdd: PlaybackFeedback = {
-          treeId: decodedFb.treeId,
-          marks: decodedFb.marks,
-          playedAt: decodedFb.playedAt,
-          reviewerName: decodedFb.reviewerName,
-        };
-        store.addFeedback(fbToAdd);
-        const nameText = decodedFb.reviewerName ? `（来自 ${decodedFb.reviewerName}）` : '';
-        setShowFeedbackBanner(`已自动加载来自分享链接的反馈${nameText}`);
-        if (!dataParam && !treeId) {
-        } else if (decodedFb.treeSnapshot) {
-          if (!dataParam) {
+      const result = store.importFeedbackCode(feedbackParam);
+      if (result.status !== 'failed') {
+        const decodedFb = decodeFeedbackCode(feedbackParam);
+        if (decodedFb) {
+          setBannerReviewerName(result.reviewerName || '匿名同学');
+          setBannerMarkCount(decodedFb.marks.length);
+          setBannerTopicId(result.topicId || '');
+          setBannerTreeId(result.treeId || '');
+          setShowFeedbackBanner('success');
+          if (!dataParam && !treeId && decodedFb.treeSnapshot) {
+            setTree(decodedFb.treeSnapshot);
+            setIsSharedTree(true);
+          } else if (!dataParam && decodedFb.treeSnapshot) {
             setTree(decodedFb.treeSnapshot);
             setIsSharedTree(true);
           }
@@ -416,21 +418,6 @@ export default function PlaybackPage() {
 
   return (
     <div className="min-h-screen bg-horror-bg flex flex-col">
-      {showFeedbackBanner && (
-        <div className="flex items-center justify-between border-b border-horror-rust/30 bg-horror-rust/10 px-4 py-2 text-sm">
-          <span className="flex items-center gap-2 text-horror-rust-light">
-            <Flame className="h-4 w-4" />
-            {showFeedbackBanner}
-          </span>
-          <button
-            className="text-horror-muted hover:text-horror-text"
-            onClick={() => setShowFeedbackBanner(null)}
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-
       <TopBar
         mode={mode}
         onModeChange={setMode}
@@ -438,6 +425,50 @@ export default function PlaybackPage() {
         onToggleStats={() => setShowStats((v) => !v)}
         onRestart={handleRestart}
       />
+
+      {showFeedbackBanner === 'success' && (
+        <div className="border-b border-green-500/30 bg-green-500/10 px-4 py-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-green-400">
+              <CheckCircle className="h-4 w-4 flex-shrink-0" />
+              <span>
+                已自动加载来自 <span className="font-medium">{bannerReviewerName || '匿名同学'}</span> 的反馈
+                {' · '}
+                共 <span className="font-medium">{bannerMarkCount}</span> 处恐惧标记
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                className="rounded-full border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-xs text-green-400 transition-all hover:bg-green-500/20 active:scale-95"
+                onClick={() => {
+                  const params = new URLSearchParams();
+                  params.set('tab', 'classroom');
+                  if (bannerTopicId) {
+                    params.set('highlightTopic', bannerTopicId);
+                  }
+                  navigate(`/?${params.toString()}`);
+                }}
+              >
+                去课堂作业包查看
+                <ChevronRight className="ml-1 inline h-3 w-3" />
+              </button>
+              <button
+                className="rounded-full border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-xs text-green-400 transition-all hover:bg-green-500/20 active:scale-95"
+                onClick={() => navigate(`/stats/${bannerTreeId}?fromFeedback=1`)}
+              >
+                直接查看作品统计
+                <ChevronRight className="ml-1 inline h-3 w-3" />
+              </button>
+              <button
+                className="text-green-400/60 hover:text-green-400 transition-colors"
+                onClick={() => setShowFeedbackBanner(null)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 relative overflow-hidden">
         {mode === 'chat' ? (
@@ -484,6 +515,8 @@ export default function PlaybackPage() {
             onCopyLink={handleCopyLink}
             copiedFeedback={copiedFeedback}
             copiedLink={copiedLink}
+            topicId={tree.topicId}
+            navigate={navigate}
           />
         )}
 
@@ -835,6 +868,8 @@ function EndScreen({
   onCopyLink,
   copiedFeedback,
   copiedLink,
+  topicId,
+  navigate,
 }: {
   fearMarkCount: number;
   feedbackSaved: boolean;
@@ -850,6 +885,8 @@ function EndScreen({
   onCopyLink: () => void;
   copiedFeedback: boolean;
   copiedLink: boolean;
+  topicId: string;
+  navigate: (path: string) => void;
 }) {
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-horror-bg/90 backdrop-blur-sm animate-fade-in overflow-y-auto py-8">
@@ -970,7 +1007,26 @@ function EndScreen({
                     </>
                   )}
                 </button>
+                <p className="mt-2 text-[10px] text-horror-muted/50">
+                  把这个链接发给同学，他们打开后反馈会自动流入你的课堂作业包
+                </p>
               </div>
+
+              <button
+                className="horror-btn-primary w-full max-w-xs text-sm mt-4"
+                onClick={() => {
+                  const params = new URLSearchParams();
+                  params.set('tab', 'classroom');
+                  if (topicId) {
+                    params.set('highlightTopic', topicId);
+                  }
+                  navigate(`/?${params.toString()}`);
+                }}
+              >
+                <GraduationCap className="mr-2 inline h-4 w-4" />
+                去课堂作业包管理
+                <ChevronRight className="ml-1 inline h-3 w-3" />
+              </button>
             </div>
           )}
 

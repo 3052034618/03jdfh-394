@@ -1,42 +1,16 @@
-import React, { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '@/store';
 import {
-  Topic,
-  SAMPLE_TOPICS,
-  TopicStats,
-  AssignmentBatch,
-  BatchImportResult,
-  NodeFearRanking,
-  DialogueTree,
-  ACT_LABELS,
+  Topic, SAMPLE_TOPICS, TopicStats, AssignmentBatch,
+  BatchImportResult, NodeFearRanking, DialogueTree, ACT_LABELS
 } from '@/types';
-import { generateId } from '@/utils';
+import { generateId, decodeFeedbackCode } from '@/utils';
 import {
-  Skull,
-  Plus,
-  BookOpen,
-  Trash2,
-  ChevronRight,
-  Flame,
-  GraduationCap,
-  Users,
-  Eye,
-  BarChart2,
-  FileDown,
-  Upload,
-  Check,
-  AlertCircle,
-  Copy,
-  TrendingUp,
-  Trophy,
-  Calendar,
-  ClipboardList,
-  FolderKanban,
-  PieChart,
-  AlertTriangle,
-  Play,
-  X,
+  Skull, Plus, BookOpen, Trash2, ChevronRight, Flame, GraduationCap, Users, Eye,
+  BarChart2, FileDown, Upload, Check, AlertCircle, Copy, TrendingUp, Trophy,
+  Calendar, ClipboardList, FolderKanban, PieChart, AlertTriangle, Play, X,
+  ArrowRight, Clock, Zap, ChevronDown, ListChecks, XCircle, MessageSquare, UserCheck
 } from 'lucide-react';
 
 const formatDate = (ts: number | null | undefined): string => {
@@ -44,25 +18,29 @@ const formatDate = (ts: number | null | undefined): string => {
   return new Date(ts).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
+const formatDateShort = (ts: number | null | undefined): string => {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
 export default function TopicPage() {
   const navigate = useNavigate();
+  const [searchParams, _setSearchParams] = useSearchParams();
+  const [highlightTopicId, setHighlightTopicId] = useState<string | null>(null);
   const {
-    topics,
-    trees,
-    feedbacks,
-    batches,
-    recoveredSnapshots,
-    addTopic,
-    removeTopic,
-    getTreeByTopicId,
-    getFeedbacksByTreeId,
-    batchImportFeedbackCodes,
-    createBatch,
-    removeBatch,
-    findAnyTree,
+    topics, trees, feedbacks, batches, recoveredSnapshots,
+    addTopic, removeTopic, getTreeByTopicId, getFeedbacksByTreeId,
+    batchImportFeedbackCodes, createBatch, removeBatch, findAnyTree,
+    getLatestFeedbackForTree, assignTreeToBatch, getBatchesByTopicId
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'create' | 'classroom' | 'panel'>('create');
+  const [activeTab, setActiveTab] = useState<number>(0);
+  const [scrollToTopicId, setScrollToTopicId] = useState<string | null>(null);
+  const [accordionState, setAccordionState] = useState<Record<string, boolean>>({});
+  const [batchAccordionState, setBatchAccordionState] = useState<Record<string, boolean>>({});
+  const [importResult, setImportResult] = useState<BatchImportResult | null>(null);
+  const [importDetailTab, setImportDetailTab] = useState<'all' | 'added' | 'skipped' | 'unparsed'>('all');
+  const [showUnparsed, setShowUnparsed] = useState(false);
 
   const [title, setTitle] = useState('');
   const [scenario, setScenario] = useState('');
@@ -70,15 +48,31 @@ export default function TopicPage() {
   const [constraintInput, setConstraintInput] = useState('');
 
   const [bulkCodesInput, setBulkCodesInput] = useState('');
-  const [importResult, setImportResult] = useState<BatchImportResult | null>(null);
-  const [expandedTopics, setExpandedTopics] = useState<Record<string, boolean>>({});
   const [copiedTopicId, setCopiedTopicId] = useState<string | null>(null);
+  const [copiedTreeId, setCopiedTreeId] = useState<string | null>(null);
 
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [batchName, setBatchName] = useState('');
   const [batchTopicId, setBatchTopicId] = useState('');
   const [batchDescription, setBatchDescription] = useState('');
   const [batchDeadline, setBatchDeadline] = useState('');
+
+  const [batchDetailTab, setBatchDetailTab] = useState<Record<string, 'withFeedback' | 'withoutFeedback' | 'ranking'>>({});
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    const highlightParam = searchParams.get('highlightTopic');
+
+    if (tabParam === 'classroom') {
+      setActiveTab(1);
+    }
+
+    if (highlightParam) {
+      setHighlightTopicId(highlightParam);
+      setAccordionState((prev) => ({ ...prev, [highlightParam]: true }));
+      setTimeout(() => setHighlightTopicId(null), 3000);
+    }
+  }, [searchParams]);
 
   const addConstraint = () => {
     const trimmed = constraintInput.trim();
@@ -158,6 +152,27 @@ export default function TopicPage() {
     });
   }, [topics, trees, feedbacks, recoveredSnapshots]);
 
+  useEffect(() => {
+    if (scrollToTopicId) {
+      setAccordionState((prev) => ({ ...prev, [scrollToTopicId]: true }));
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`topic-${scrollToTopicId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('animate-pulse-glow');
+          setTimeout(() => el.classList.remove('animate-pulse-glow'), 2000);
+        }
+        setScrollToTopicId(null);
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [scrollToTopicId]);
+
+  const handleJumpToTopic = (topicId: string) => {
+    setActiveTab(0);
+    setScrollToTopicId(topicId);
+  };
+
   const totalTopicsCount = topics.length;
   const totalTreesCount = trees.length + Object.keys(recoveredSnapshots).filter(
     (id) => !trees.some((t) => t.id === id),
@@ -166,7 +181,11 @@ export default function TopicPage() {
   const totalBatchesCount = batches.length;
 
   const toggleTopicExpand = (topicId: string) => {
-    setExpandedTopics((prev) => ({ ...prev, [topicId]: !prev[topicId] }));
+    setAccordionState((prev) => ({ ...prev, [topicId]: !prev[topicId] }));
+  };
+
+  const toggleBatchExpand = (batchId: string) => {
+    setBatchAccordionState((prev) => ({ ...prev, [batchId]: !prev[batchId] }));
   };
 
   const copyTopicUrl = (topicId: string) => {
@@ -174,6 +193,14 @@ export default function TopicPage() {
     navigator.clipboard?.writeText(url).then(() => {
       setCopiedTopicId(topicId);
       setTimeout(() => setCopiedTopicId(null), 2000);
+    });
+  };
+
+  const copyTreeUrl = (treeId: string) => {
+    const url = `${window.location.origin}/play/${treeId}`;
+    navigator.clipboard?.writeText(url).then(() => {
+      setCopiedTreeId(treeId);
+      setTimeout(() => setCopiedTreeId(null), 2000);
     });
   };
 
@@ -215,12 +242,82 @@ export default function TopicPage() {
     }
   };
 
-  const getBatchFeedbacksCount = (batch: AssignmentBatch) => {
-    let count = 0;
-    for (const treeId of batch.assignedTreeIds) {
-      count += getFeedbacksByTreeId(treeId).length;
+  const getBatchTrees = (batch: AssignmentBatch): DialogueTree[] => {
+    const allTrees: DialogueTree[] = [
+      ...trees,
+      ...Object.values(recoveredSnapshots).filter((t) => !trees.some((d) => d.id === t.id)),
+    ];
+    return allTrees.filter((t) => t.topicId === batch.topicId);
+  };
+
+  const getBatchStats = (batch: AssignmentBatch) => {
+    const batchTrees = getBatchTrees(batch);
+    const totalWorks = batchTrees.length;
+    let withFeedback = 0;
+    let withoutFeedback = 0;
+    for (const tree of batchTrees) {
+      const fbCount = getFeedbacksByTreeId(tree.id).length;
+      if (fbCount > 0) withFeedback++;
+      else withoutFeedback++;
     }
-    return count;
+    return { totalWorks, withFeedback, withoutFeedback, trees: batchTrees };
+  };
+
+  const getBatchTopFearNodes = (batch: AssignmentBatch) => {
+    const batchTrees = getBatchTrees(batch);
+    const nodeMarkMap: Record<string, {
+      count: number;
+      reviewerNames: Set<string>;
+      treeId: string;
+      authorName: string;
+      nodeText: string;
+      actType: NodeFearRanking['actType'];
+    }> = {};
+
+    for (const tree of batchTrees) {
+      const treeFeedbacks = getFeedbacksByTreeId(tree.id);
+      for (const fb of treeFeedbacks) {
+        for (const mark of fb.marks) {
+          if (!nodeMarkMap[mark.nodeId]) {
+            let nodeText = '';
+            let actType: NodeFearRanking['actType'] = 'opening';
+            for (const act of tree.acts) {
+              const node = act.nodes.find((n) => n.id === mark.nodeId);
+              if (node) {
+                nodeText = node.content;
+                actType = act.type;
+                break;
+              }
+            }
+            nodeMarkMap[mark.nodeId] = {
+              count: 0,
+              reviewerNames: new Set(),
+              treeId: tree.id,
+              authorName: tree.authorName || '匿名作者',
+              nodeText,
+              actType,
+            };
+          }
+          nodeMarkMap[mark.nodeId].count++;
+          if (fb.reviewerName) {
+            nodeMarkMap[mark.nodeId].reviewerNames.add(fb.reviewerName);
+          }
+        }
+      }
+    }
+
+    return Object.values(nodeMarkMap)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+      .map((n) => ({
+        nodeId: '',
+        nodeText: n.nodeText,
+        actType: n.actType,
+        markCount: n.count,
+        reviewerNames: Array.from(n.reviewerNames),
+        treeId: n.treeId,
+        authorName: n.authorName,
+      }));
   };
 
   const recoveryRateData = useMemo(() => {
@@ -360,6 +457,27 @@ export default function TopicPage() {
 
   const topMarkCount = globalFearRankings.length > 0 ? globalFearRankings[0].markCount : 1;
 
+  const getAffectedTopics = () => {
+    if (!importResult) return [];
+    return importResult.affectedTopicIds
+      .map((id) => topics.find((t) => t.id === id))
+      .filter(Boolean) as Topic[];
+  };
+
+  const filteredImportDetails = useMemo(() => {
+    if (!importResult) return [];
+    if (importDetailTab === 'all') return importResult.details;
+    return importResult.details.filter((d) => d.status === importDetailTab);
+  }, [importResult, importDetailTab]);
+
+  const getBatchDetailTab = (batchId: string) => {
+    return batchDetailTab[batchId] || 'withFeedback';
+  };
+
+  const setBatchDetailTabValue = (batchId: string, tab: 'withFeedback' | 'withoutFeedback' | 'ranking') => {
+    setBatchDetailTab((prev) => ({ ...prev, [batchId]: tab }));
+  };
+
   return (
     <div className="min-h-screen bg-horror-bg animate-fade-in">
       <div className="mx-auto max-w-6xl px-4 py-8">
@@ -375,37 +493,37 @@ export default function TopicPage() {
         <div className="mb-8 flex justify-center gap-2">
           <button
             className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-              activeTab === 'create'
+              activeTab === 0
                 ? 'bg-horror-rust/15 text-horror-rust'
                 : 'text-horror-muted hover:text-horror-rust'
             }`}
-            onClick={() => setActiveTab('create')}
+            onClick={() => setActiveTab(0)}
           >
             📝 创建设置
           </button>
           <button
             className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-              activeTab === 'classroom'
+              activeTab === 1
                 ? 'bg-horror-rust/15 text-horror-rust'
                 : 'text-horror-muted hover:text-horror-rust'
             }`}
-            onClick={() => setActiveTab('classroom')}
+            onClick={() => setActiveTab(1)}
           >
             🎓 课堂作业包
           </button>
           <button
             className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-              activeTab === 'panel'
+              activeTab === 2
                 ? 'bg-horror-rust/15 text-horror-rust'
                 : 'text-horror-muted hover:text-horror-rust'
             }`}
-            onClick={() => setActiveTab('panel')}
+            onClick={() => setActiveTab(2)}
           >
             📊 班级回收面板
           </button>
         </div>
 
-        {activeTab === 'create' && (
+        {activeTab === 0 && (
           <div>
             <div className="horror-card mb-8">
               <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
@@ -563,21 +681,21 @@ export default function TopicPage() {
           </div>
         )}
 
-        {activeTab === 'classroom' && (
+        {activeTab === 1 && (
           <div className="space-y-8">
             <div className="horror-card">
-              <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
+              <h2 className="mb-2 flex items-center gap-2 text-lg font-medium text-horror-text">
                 <Upload className="h-5 w-5 text-horror-rust" />
                 批量导入反馈码
               </h2>
               <p className="mb-3 text-sm text-horror-muted">
-                一行一个 FB- 开头的反馈码，支持粘贴多条
+                粘贴同学发来的反馈码，一行一个，也可直接把一大段聊天记录粘进来，自动识别 FB- 开头的码
               </p>
               <div className="space-y-3">
                 <textarea
                   className="horror-input resize-vertical"
                   rows={6}
-                  placeholder="FB-xxxxxxxxxxx\nFB-yyyyyyyyyyyy\nFB-zzzzzzzzzzzz..."
+                  placeholder="FB-xxxxxxxxxxx&#10;FB-yyyyyyyyyyyy&#10;或者直接粘贴聊天记录..."
                   value={bulkCodesInput}
                   onChange={(e) => {
                     setBulkCodesInput(e.target.value);
@@ -599,71 +717,135 @@ export default function TopicPage() {
                     清空
                   </button>
                 </div>
+
                 {importResult && (
-                  <div
-                    className={`rounded-lg p-4 space-y-2 border-l-4 ${
-                      importResult.added > 0
-                        ? 'bg-green-900/10 border-green-600'
-                        : importResult.skipped > 0
-                        ? 'bg-yellow-900/10 border-yellow-600'
-                        : importResult.failed > 0
-                        ? 'bg-red-900/10 border-red-600'
-                        : 'bg-blue-900/10 border-blue-600'
-                    }`}
-                  >
+                  <div className="mt-4 space-y-2">
                     {importResult.added > 0 && (
-                      <div className="flex items-start gap-2 text-sm text-green-400">
-                        <Check className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>✅ 新增反馈: {importResult.added} 份</span>
+                      <div className="flex items-center gap-2 rounded-lg border-l-4 border-green-600 bg-green-900/10 px-4 py-2 text-sm text-green-400">
+                        <Check className="h-4 w-4 shrink-0" />
+                        <span>🟢 新增 {importResult.added} 份反馈</span>
                       </div>
                     )}
                     {importResult.skipped > 0 && (
-                      <div className="flex items-start gap-2 text-sm text-yellow-400">
-                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>⚠️ 跳过重复: {importResult.skipped} 份</span>
+                      <div className="flex items-center gap-2 rounded-lg border-l-4 border-yellow-600 bg-yellow-900/10 px-4 py-2 text-sm text-yellow-400">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>🟡 跳过重复 {importResult.skipped} 份</span>
                       </div>
                     )}
                     {importResult.failed > 0 && (
-                      <div className="flex items-start gap-2 text-sm text-red-400">
-                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>❌ 无效码: {importResult.failed} 份</span>
+                      <div className="flex items-center gap-2 rounded-lg border-l-4 border-red-600 bg-red-900/10 px-4 py-2 text-sm text-red-400">
+                        <XCircle className="h-4 w-4 shrink-0" />
+                        <span>🔴 无效码 {importResult.failed} 份</span>
+                      </div>
+                    )}
+                    {importResult.unparsed.length > 0 && (
+                      <div>
+                        <button
+                          className="flex w-full items-center gap-2 rounded-lg border-l-4 border-gray-500 bg-gray-900/10 px-4 py-2 text-sm text-gray-400"
+                          onClick={() => setShowUnparsed(!showUnparsed)}
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0" />
+                          <span className="flex-1 text-left">⚪ 未识别 {importResult.unparsed.length} 行</span>
+                          <ChevronDown className={`h-4 w-4 transition-transform ${showUnparsed ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showUnparsed && (
+                          <div className="mt-2 ml-6 space-y-1 border-l border-gray-700 pl-4">
+                            {importResult.unparsed.map((item, i) => (
+                              <div key={i} className="flex items-start gap-2 text-xs text-gray-500">
+                                <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                                <span className="truncate">{item.line}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                     {importResult.recoveredTrees > 0 && (
-                      <div className="flex items-start gap-2 text-sm text-blue-400">
-                        <FileDown className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>💾 自动恢复作品快照: {importResult.recoveredTrees} 份</span>
+                      <div className="flex items-center gap-2 rounded-lg border-l-4 border-blue-600 bg-blue-900/10 px-4 py-2 text-sm text-blue-400">
+                        <FileDown className="h-4 w-4 shrink-0" />
+                        <span>🔵 自动恢复作品 {importResult.recoveredTrees} 份</span>
                       </div>
                     )}
+
                     {importResult.details.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-horror-border/50 space-y-1 max-h-48 overflow-y-auto">
-                        {importResult.details.slice(0, 10).map((d, i) => (
-                          <div key={i} className="flex items-start gap-2 text-xs">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded-full ${
-                                d.status === 'added'
-                                  ? 'bg-green-900/30 text-green-400'
-                                  : d.status === 'skipped'
-                                  ? 'bg-yellow-900/30 text-yellow-400'
-                                  : 'bg-red-900/30 text-red-400'
+                      <div className="mt-4 border-t border-horror-border/50 pt-4">
+                        <div className="mb-3 flex gap-1">
+                          {(['all', 'added', 'skipped', 'unparsed'] as const).map((tab) => (
+                            <button
+                              key={tab}
+                              className={`rounded px-3 py-1 text-xs transition-colors ${
+                                importDetailTab === tab
+                                  ? 'bg-horror-rust/15 text-horror-rust'
+                                  : 'text-horror-muted hover:text-horror-text'
                               }`}
+                              onClick={() => setImportDetailTab(tab)}
                             >
-                              {d.status === 'added' ? '新增' : d.status === 'skipped' ? '跳过' : '无效'}
-                            </span>
-                            <span className="text-horror-muted truncate flex-1">
-                              {d.message || d.code.slice(0, 30) + '...'}
-                            </span>
-                          </div>
-                        ))}
-                        {importResult.details.length > 10 && (
-                          <div className="text-xs text-horror-muted/70">
-                            ... 还有 {importResult.details.length - 10} 条
+                              {tab === 'all' ? '全部' : tab === 'added' ? '新增' : tab === 'skipped' ? '跳过' : '未识别'}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="space-y-1 max-h-60 overflow-y-auto">
+                          {filteredImportDetails.map((d, i) => (
+                            <div key={i} className="flex items-center gap-2 text-xs">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-full shrink-0 ${
+                                  d.status === 'added'
+                                    ? 'bg-green-900/30 text-green-400'
+                                    : d.status === 'skipped'
+                                    ? 'bg-yellow-900/30 text-yellow-400'
+                                    : 'bg-red-900/30 text-red-400'
+                                }`}
+                              >
+                                {d.status === 'added' ? '新增' : d.status === 'skipped' ? '跳过' : '无效'}
+                              </span>
+                              <span className="text-horror-text font-medium shrink-0">{d.reviewerName || '匿名'}</span>
+                              <span className="text-horror-muted truncate flex-1">
+                                {d.message || d.code.slice(0, 30) + '...'}
+                              </span>
+                              {d.treeId && (
+                                <button
+                                  className="text-horror-rust hover:text-horror-rust-light shrink-0"
+                                  onClick={() => navigate(`/stats/${d.treeId}`)}
+                                >
+                                  去查看 →
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {importResult.affectedTopicIds.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-horror-border/50">
+                        {importResult.affectedTopicIds.length === 1 ? (
+                          <button
+                            className="horror-btn-primary w-full flex items-center justify-center gap-2 text-base py-3"
+                            onClick={() => handleJumpToTopic(importResult.affectedTopicIds[0])}
+                          >
+                            <ArrowRight className="h-5 w-5" />
+                            直接跳转到该题目汇总 →
+                          </button>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="text-sm text-horror-muted mb-2">导入涉及多个题目，选择跳转：</div>
+                            {getAffectedTopics().map((topic) => (
+                              <button
+                                key={topic.id}
+                                className="horror-btn-ghost w-full flex items-center justify-between text-left"
+                                onClick={() => handleJumpToTopic(topic.id)}
+                              >
+                                <span>查看 {topic.title} 汇总</span>
+                                <ArrowRight className="h-4 w-4" />
+                              </button>
+                            ))}
                           </div>
                         )}
                       </div>
                     )}
                   </div>
                 )}
+
                 <div className="pt-2 text-xs text-horror-muted/70">
                   累计导入 <span className="text-horror-text font-medium">{feedbacks.length}</span> 份反馈
                 </div>
@@ -673,7 +855,7 @@ export default function TopicPage() {
             <div>
               <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
                 <BarChart2 className="h-5 w-5 text-horror-rust" />
-                题目汇总表
+                题目汇总
               </h2>
               <div className="space-y-3">
                 {topicStats.length === 0 ? (
@@ -682,9 +864,16 @@ export default function TopicPage() {
                   </div>
                 ) : (
                   topicStats.map((stats) => {
-                    const isExpanded = expandedTopics[stats.topic.id] || false;
+                    const isExpanded = accordionState[stats.topic.id] || false;
+                    const topicBatches = getBatchesByTopicId(stats.topic.id);
                     return (
-                      <div key={stats.topic.id} className="horror-card overflow-hidden">
+                      <div
+                        key={stats.topic.id}
+                        id={`topic-${stats.topic.id}`}
+                        className={`horror-card overflow-hidden transition-all duration-300 ${
+                          highlightTopicId === stats.topic.id ? 'ring-2 ring-green-500/50 animate-pulse' : ''
+                        }`}
+                      >
                         <button
                           className="w-full flex items-center justify-between gap-3 p-4 text-left hover:bg-horror-card-hover transition-colors"
                           onClick={() => toggleTopicExpand(stats.topic.id)}
@@ -708,9 +897,9 @@ export default function TopicPage() {
                               <Flame className="h-3.5 w-3.5" />
                               {stats.totalMarks} 个恐惧点
                             </span>
-                            <ChevronRight
+                            <ChevronDown
                               className={`h-4 w-4 text-horror-muted transition-transform ${
-                                isExpanded ? 'rotate-90' : ''
+                                isExpanded ? 'rotate-180' : ''
                               }`}
                             />
                           </div>
@@ -771,6 +960,7 @@ export default function TopicPage() {
                                       0,
                                     );
                                     const topNodes = getTopFearNodes(resolvedTree.id);
+                                    const latestFeedback = getLatestFeedbackForTree(resolvedTree.id);
                                     return (
                                       <div
                                         key={resolvedTree.id}
@@ -786,11 +976,27 @@ export default function TopicPage() {
                                             </div>
                                           </div>
                                         </div>
-                                        <div className="flex items-center gap-3 mb-3 text-xs text-horror-muted">
-                                          <span>{countDialogueNodes(resolvedTree)} 条对白</span>
-                                          <span>{treeFeedbacks.length} 份反馈</span>
-                                          <span className="text-horror-rust">{treeMarks} 恐惧点</span>
+                                        <div className="flex items-center gap-3 mb-2 text-xs text-horror-muted">
+                                          <span className="inline-flex items-center gap-1">
+                                            <MessageSquare className="h-3 w-3" />
+                                            {countDialogueNodes(resolvedTree)} 条对白
+                                          </span>
+                                          <span className="inline-flex items-center gap-1">
+                                            <UserCheck className="h-3 w-3" />
+                                            {treeFeedbacks.length} 份反馈
+                                          </span>
+                                          <span className="text-horror-rust inline-flex items-center gap-1">
+                                            <Flame className="h-3 w-3" />
+                                            {treeMarks} 恐惧点
+                                          </span>
                                         </div>
+
+                                        {latestFeedback && (
+                                          <div className="mb-2 inline-flex items-center gap-1.5 rounded-full bg-horror-rust/10 px-2 py-1 text-[11px] text-horror-rust">
+                                            <UserCheck className="h-3 w-3" />
+                                            👤 {latestFeedback.reviewerName || '匿名'} · {formatDateShort(latestFeedback.playedAt)}
+                                          </div>
+                                        )}
 
                                         {topNodes.length > 0 && (
                                           <div className="mb-3 space-y-1">
@@ -814,7 +1020,7 @@ export default function TopicPage() {
                                           </div>
                                         )}
 
-                                        <div className="flex items-center gap-1.5">
+                                        <div className="flex items-center gap-1.5 mb-2">
                                           <button
                                             className="horror-btn-primary text-[11px] px-2 py-1 flex-1 flex items-center justify-center gap-1"
                                             onClick={() => navigate(`/stats/${resolvedTree.id}`)}
@@ -840,6 +1046,28 @@ export default function TopicPage() {
                                             查看
                                           </button>
                                         </div>
+
+                                        {topicBatches.length > 0 && (
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-[11px] text-horror-muted">分配到批次:</span>
+                                            <select
+                                              className="flex-1 rounded border border-horror-border/50 bg-horror-bg px-2 py-1 text-[11px] text-horror-text focus:border-horror-rust focus:outline-none"
+                                              defaultValue=""
+                                              onChange={(e) => {
+                                                if (e.target.value) {
+                                                  assignTreeToBatch(e.target.value, resolvedTree.id);
+                                                }
+                                              }}
+                                            >
+                                              <option value="" disabled>选择批次</option>
+                                              {topicBatches.map((b) => (
+                                                <option key={b.id} value={b.id} disabled={b.assignedTreeIds.includes(resolvedTree.id)}>
+                                                  {b.name} {b.assignedTreeIds.includes(resolvedTree.id) ? '(已分配)' : ''}
+                                                </option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                        )}
                                       </div>
                                     );
                                   })}
@@ -886,7 +1114,7 @@ export default function TopicPage() {
           </div>
         )}
 
-        {activeTab === 'panel' && (
+        {activeTab === 2 && (
           <div className="space-y-8">
             <div>
               <div className="mb-4 flex items-center justify-between">
@@ -980,69 +1208,274 @@ export default function TopicPage() {
                 <div className="space-y-3">
                   {batches.map((batch) => {
                     const topic = topics.find((t) => t.id === batch.topicId);
-                    const assignedCount = batch.assignedTreeIds.length;
-                    const feedbacksCount = getBatchFeedbacksCount(batch);
-                    const progressPct = assignedCount > 0 ? Math.min(100, Math.round((feedbacksCount / assignedCount) * 100)) : 0;
-                    const firstTreeId = batch.assignedTreeIds[0];
+                    const batchStats = getBatchStats(batch);
+                    const progressPct = batchStats.totalWorks > 0
+                      ? Math.min(100, Math.round((batchStats.withFeedback / batchStats.totalWorks) * 100))
+                      : 0;
+                    const isExpanded = batchAccordionState[batch.id] || false;
+                    const currentTab = getBatchDetailTab(batch.id);
+                    const topFearNodes = getBatchTopFearNodes(batch);
+                    const batchTopMarkCount = topFearNodes.length > 0 ? topFearNodes[0].markCount : 1;
+
+                    const treesWithFeedback = batchStats.trees.filter(
+                      (t) => getFeedbacksByTreeId(t.id).length > 0
+                    );
+                    const treesWithoutFeedback = batchStats.trees.filter(
+                      (t) => getFeedbacksByTreeId(t.id).length === 0
+                    );
+
                     return (
-                      <div key={batch.id} className="horror-card">
-                        <div className="flex items-start justify-between gap-3 mb-3">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <FolderKanban className="h-5 w-5 text-horror-rust shrink-0" />
-                              <h3 className="font-medium text-horror-text truncate">{batch.name}</h3>
+                      <div key={batch.id} className="horror-card overflow-hidden">
+                        <button
+                          className="w-full p-4 text-left hover:bg-horror-card-hover transition-colors"
+                          onClick={() => toggleBatchExpand(batch.id)}
+                        >
+                          <div className="flex items-start justify-between gap-3 mb-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 mb-1">
+                                <FolderKanban className="h-5 w-5 text-horror-rust shrink-0" />
+                                <h3 className="font-medium text-horror-text truncate">{batch.name}</h3>
+                              </div>
+                              <div className="text-xs text-horror-muted space-y-0.5">
+                                <div>所属题目: {topic?.title || '题目已删除'}</div>
+                                <div className="flex items-center gap-1">
+                                  <Clock className="h-3 w-3" />
+                                  截止日期: {formatDate(batch.deadline)}
+                                </div>
+                              </div>
                             </div>
-                            <div className="text-xs text-horror-muted space-y-0.5">
-                              <div>所属题目: {topic?.title || '题目已删除'}</div>
-                              <div>截止日期: {formatDate(batch.deadline)}</div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                className="horror-btn-ghost text-xs text-horror-danger hover:text-horror-danger p-2"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRemoveBatch(batch.id, batch.name);
+                                }}
+                                title="删除批次"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                              <ChevronDown
+                                className={`h-4 w-4 text-horror-muted transition-transform ${
+                                  isExpanded ? 'rotate-180' : ''
+                                }`}
+                              />
                             </div>
                           </div>
-                          <button
-                            className="horror-btn-ghost text-xs text-horror-danger hover:text-horror-danger p-2"
-                            onClick={() => handleRemoveBatch(batch.id, batch.name)}
-                            title="删除批次"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
-                        {batch.description && (
-                          <div className="mb-3 text-xs text-horror-muted/90 bg-horror-card-hover/30 rounded p-2">
-                            {batch.description}
+                          {batch.description && (
+                            <div className="mb-3 text-xs text-horror-muted/90 bg-horror-card-hover/30 rounded p-2">
+                              {batch.description}
+                            </div>
+                          )}
+                          <div className="mb-3">
+                            <div className="flex justify-between text-xs text-horror-muted mb-1">
+                              <span>已收到反馈 / 总作品</span>
+                              <span>{batchStats.withFeedback} / {batchStats.totalWorks}</span>
+                            </div>
+                            <div className="h-2 rounded-full bg-horror-card-hover overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-horror-rust/80 transition-all"
+                                style={{ width: `${progressPct}%` }}
+                              />
+                            </div>
                           </div>
-                        )}
-                        <div className="mb-3">
-                          <div className="flex justify-between text-xs text-horror-muted mb-1">
-                            <span>回收进度</span>
-                            <span>{feedbacksCount} / {assignedCount}</span>
-                          </div>
-                          <div className="h-2 rounded-full bg-horror-card-hover overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-horror-rust/80 transition-all"
-                              style={{ width: `${progressPct}%` }}
-                            />
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="inline-flex items-center gap-1 rounded-full bg-horror-card-hover px-2.5 py-1 text-xs text-horror-muted">
                               <Users className="h-3.5 w-3.5" />
-                              {assignedCount} 份作品
+                              {batchStats.totalWorks} 份作品
                             </span>
-                            <span className="inline-flex items-center gap-1 rounded-full bg-horror-card-hover px-2.5 py-1 text-xs text-horror-muted">
-                              <BarChart2 className="h-3.5 w-3.5" />
-                              {feedbacksCount} 份已回收反馈
+                            <span className="inline-flex items-center gap-1 rounded-full bg-green-900/20 px-2.5 py-1 text-xs text-green-400">
+                              <Check className="h-3.5 w-3.5" />
+                              {batchStats.withFeedback} 份已反馈
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded-full bg-yellow-900/20 px-2.5 py-1 text-xs text-yellow-400">
+                              <Clock className="h-3.5 w-3.5" />
+                              {batchStats.withoutFeedback} 份未反馈
                             </span>
                           </div>
-                          {firstTreeId && (
-                            <button
-                              className="horror-btn-ghost text-xs flex items-center gap-1"
-                              onClick={() => navigate(`/stats/${firstTreeId}`)}
-                            >
-                              <BarChart2 className="h-3.5 w-3.5" />
-                              查看统计汇总
-                            </button>
-                          )}
-                        </div>
+                        </button>
+
+                        {isExpanded && (
+                          <div className="border-t border-horror-border/50 p-4">
+                            <div className="mb-4 flex gap-1 border-b border-horror-border/50">
+                              <button
+                                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                                  currentTab === 'withFeedback'
+                                    ? 'text-horror-rust border-b-2 border-horror-rust'
+                                    : 'text-horror-muted hover:text-horror-text'
+                                }`}
+                                onClick={() => setBatchDetailTabValue(batch.id, 'withFeedback')}
+                              >
+                                🟢 已交反馈作品
+                              </button>
+                              <button
+                                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                                  currentTab === 'withoutFeedback'
+                                    ? 'text-horror-rust border-b-2 border-horror-rust'
+                                    : 'text-horror-muted hover:text-horror-text'
+                                }`}
+                                onClick={() => setBatchDetailTabValue(batch.id, 'withoutFeedback')}
+                              >
+                                ⚪ 未交反馈作品
+                              </button>
+                              <button
+                                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                                  currentTab === 'ranking'
+                                    ? 'text-horror-rust border-b-2 border-horror-rust'
+                                    : 'text-horror-muted hover:text-horror-text'
+                                }`}
+                                onClick={() => setBatchDetailTabValue(batch.id, 'ranking')}
+                              >
+                                🏆 本批次高恐惧排行
+                              </button>
+                            </div>
+
+                            {currentTab === 'withFeedback' && (
+                              <div className="space-y-2 max-h-96 overflow-y-auto">
+                                {treesWithFeedback.length === 0 ? (
+                                  <div className="text-center py-6 text-horror-muted text-sm">
+                                    暂无已反馈作品
+                                  </div>
+                                ) : (
+                                  treesWithFeedback.map((tree) => {
+                                    const treeFeedbacks = getFeedbacksByTreeId(tree.id);
+                                    const treeMarks = treeFeedbacks.reduce((s, fb) => s + fb.marks.length, 0);
+                                    const latestFb = getLatestFeedbackForTree(tree.id);
+                                    return (
+                                      <div key={tree.id} className="rounded-lg border border-horror-border/50 p-3 bg-horror-card-hover/30 flex items-center justify-between gap-3">
+                                        <div className="min-w-0 flex-1">
+                                          <div className="text-sm font-medium text-horror-text truncate">
+                                            {tree.authorName || '匿名作者'}
+                                          </div>
+                                          <div className="flex items-center gap-3 text-xs text-horror-muted mt-1">
+                                            <span className="inline-flex items-center gap-1">
+                                              <UserCheck className="h-3 w-3" />
+                                              最近: {latestFb?.reviewerName || '匿名'}
+                                            </span>
+                                            <span className="inline-flex items-center gap-1">
+                                              <MessageSquare className="h-3 w-3" />
+                                              {treeFeedbacks.length} 反馈
+                                            </span>
+                                            <span className="text-horror-rust inline-flex items-center gap-1">
+                                              <Flame className="h-3 w-3" />
+                                              {treeMarks} 恐惧点
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <button
+                                          className="horror-btn-ghost text-xs shrink-0"
+                                          onClick={() => navigate(`/stats/${tree.id}`)}
+                                        >
+                                          📊去统计
+                                        </button>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            )}
+
+                            {currentTab === 'withoutFeedback' && (
+                              <div className="space-y-2 max-h-96 overflow-y-auto">
+                                {treesWithoutFeedback.length === 0 ? (
+                                  <div className="text-center py-6 text-horror-muted text-sm">
+                                    所有作品都已收到反馈，太棒了！
+                                  </div>
+                                ) : (
+                                  treesWithoutFeedback.map((tree) => (
+                                    <div key={tree.id} className="rounded-lg border border-horror-border/50 p-3 bg-horror-card-hover/30 flex items-center justify-between gap-3">
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-sm font-medium text-horror-text truncate">
+                                          {tree.authorName || '匿名作者'}
+                                        </div>
+                                        <div className="text-xs text-horror-muted mt-1">
+                                          创建于 {formatDateShort(tree.createdAt)}
+                                        </div>
+                                      </div>
+                                      <button
+                                        className="horror-btn-ghost text-xs shrink-0 inline-flex items-center gap-1"
+                                        onClick={() => copyTreeUrl(tree.id)}
+                                      >
+                                        {copiedTreeId === tree.id ? (
+                                          <>
+                                            <Check className="h-3 w-3" />
+                                            已复制
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Copy className="h-3 w-3" />
+                                            分享链接
+                                          </>
+                                        )}
+                                      </button>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            )}
+
+                            {currentTab === 'ranking' && (
+                              <div className="space-y-2 max-h-96 overflow-y-auto">
+                                {topFearNodes.length === 0 ? (
+                                  <div className="text-center py-6 text-horror-muted text-sm">
+                                    暂无恐惧标记数据
+                                  </div>
+                                ) : (
+                                  topFearNodes.map((item, index) => {
+                                    const heatPct = batchTopMarkCount > 0 ? (item.markCount / batchTopMarkCount) * 100 : 0;
+                                    const medalIcon = index === 0 ? '🏆' : index === 1 ? '🥈' : index === 2 ? '🥉' : null;
+                                    return (
+                                      <div key={index} className="rounded-lg border border-horror-border/50 p-3">
+                                        <div className="flex items-start gap-3">
+                                          <div className="shrink-0 w-8 text-center">
+                                            {medalIcon ? (
+                                              <span className="text-lg">{medalIcon}</span>
+                                            ) : (
+                                              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-horror-card-hover text-horror-muted text-[11px] font-bold">
+                                                #{index + 1}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2 mb-1">
+                                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-horror-rust/15 text-horror-rust text-[10px] font-medium">
+                                                {ACT_LABELS[item.actType]}
+                                              </span>
+                                              <span className="text-[10px] text-horror-muted/70">
+                                                {item.authorName}
+                                              </span>
+                                            </div>
+                                            <div className="text-xs text-horror-text/90 mb-2 line-clamp-2">
+                                              {item.nodeText}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                              <div className="h-1.5 flex-1 rounded-full bg-horror-card-hover overflow-hidden">
+                                                <div
+                                                  className="h-full rounded-full bg-horror-rust/80"
+                                                  style={{ width: `${heatPct}%` }}
+                                                />
+                                              </div>
+                                              <span className="text-[10px] text-horror-rust inline-flex items-center gap-1">
+                                                <Flame className="h-3 w-3" />
+                                                {item.markCount}
+                                              </span>
+                                              <button
+                                                className="text-[10px] text-horror-rust hover:text-horror-rust-light"
+                                                onClick={() => navigate(`/stats/${item.treeId}`)}
+                                              >
+                                                去统计 →
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -1101,6 +1534,11 @@ export default function TopicPage() {
                   {globalFearRankings.map((item, index) => {
                     const heatPct = topMarkCount > 0 ? (item.markCount / topMarkCount) * 100 : 0;
                     const medalIcon = index === 0 ? '🏆' : index === 1 ? '🥈' : index === 2 ? '🥉' : null;
+                    const topic = topics.find((t) => {
+                      const tree = findAnyTree(item.treeId);
+                      return tree && t.id === tree.topicId;
+                    });
+                    const topicTreeCount = topic ? topicStats.find((s) => s.topic.id === topic.id)?.trees.length || 0 : 0;
                     return (
                       <div key={item.nodeId} className="horror-card">
                         <div className="flex items-start gap-3">
@@ -1114,13 +1552,14 @@ export default function TopicPage() {
                             )}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 mb-2">
+                            <div className="flex items-center gap-2 mb-2 flex-wrap">
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-horror-rust/15 text-horror-rust text-[11px] font-medium">
                                 {ACT_LABELS[item.actType]}
                               </span>
                               {item.authorName && (
-                                <span className="text-[11px] text-horror-muted/70">
-                                  作者: {item.authorName}
+                                <span className="text-[11px] text-horror-muted/70 inline-flex items-center gap-1">
+                                  <UserCheck className="h-3 w-3" />
+                                  {item.authorName}
                                 </span>
                               )}
                             </div>
@@ -1149,15 +1588,26 @@ export default function TopicPage() {
                                   {item.reviewerNames.length > 0 ? `${item.reviewerNames.length} 人标记` : '匿名标记'}
                                 </span>
                               </div>
-                              {item.treeId && (
-                                <button
-                                  className="horror-btn-ghost text-[11px] flex items-center gap-1"
-                                  onClick={() => navigate(`/stats/${item.treeId}`)}
-                                >
-                                  <BarChart2 className="h-3 w-3" />
-                                  查看作品统计
-                                </button>
-                              )}
+                              <div className="flex items-center gap-2">
+                                {topicTreeCount > 1 && topic && (
+                                  <button
+                                    className="horror-btn-ghost text-[11px] flex items-center gap-1"
+                                    onClick={() => navigate(`/review/${topic.id}`)}
+                                  >
+                                    <BarChart2 className="h-3 w-3" />
+                                    跳转课程复盘
+                                  </button>
+                                )}
+                                {item.treeId && (
+                                  <button
+                                    className="horror-btn-ghost text-[11px] flex items-center gap-1"
+                                    onClick={() => navigate(`/stats/${item.treeId}`)}
+                                  >
+                                    <BarChart2 className="h-3 w-3" />
+                                    查看作品统计
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </div>

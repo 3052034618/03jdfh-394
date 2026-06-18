@@ -10,6 +10,7 @@ import type {
   AssignmentBatch,
   BatchImportResult,
   FeedbackCode,
+  ImportCodeResult,
 } from '@/types';
 import { ActType } from '@/types';
 import { generateId, decodeFeedbackCode } from '@/utils';
@@ -56,8 +57,9 @@ interface AppState {
   unassignTreeFromBatch: (batchId: string, treeId: string) => void;
 
   isFeedbackDuplicate: (feedback: PlaybackFeedback, existing?: PlaybackFeedback[]) => boolean;
-  importFeedbackCode: (code: string) => BatchImportResult['details'][number];
+  importFeedbackCode: (code: string) => ImportCodeResult;
   batchImportFeedbackCodes: (codesText: string) => BatchImportResult;
+  getLatestFeedbackForTree: (treeId: string) => PlaybackFeedback | null;
 }
 
 function loadFromStorage<T>(key: string, fallback: T): T {
@@ -309,6 +311,12 @@ export const useStore = create<AppState>((set, get) => ({
     return get().feedbacks.filter((fb) => fb.treeId === treeId);
   },
 
+  getLatestFeedbackForTree: (treeId) => {
+    const fbs = get().feedbacks.filter((fb) => fb.treeId === treeId);
+    if (fbs.length === 0) return null;
+    return fbs.sort((a, b) => b.playedAt - a.playedAt)[0];
+  },
+
   importFeedback: (feedback, treeSnapshot) => {
     if (treeSnapshot) {
       const existingTree = get().trees.find((t) => t.id === treeSnapshot.id);
@@ -321,6 +329,15 @@ export const useStore = create<AppState>((set, get) => ({
       saveToStorage('horror-feedbacks', feedbacks);
       return { feedbacks };
     });
+    const topicId = treeSnapshot?.topicId || get().findAnyTree(feedback.treeId)?.topicId;
+    if (topicId) {
+      const batches = get().batches.filter((b) => b.topicId === topicId);
+      for (const batch of batches) {
+        if (!batch.assignedTreeIds.includes(feedback.treeId)) {
+          get().assignTreeToBatch(batch.id, feedback.treeId);
+        }
+      }
+    }
   },
 
   importTreeSnapshot: (snapshot) => {
@@ -339,6 +356,12 @@ export const useStore = create<AppState>((set, get) => ({
       saveToStorage('horror-trees', trees);
       return { trees, recoveredSnapshots: recoveredCopy };
     });
+    const batches = get().batches.filter((b) => b.topicId === snapshot.topicId);
+    for (const batch of batches) {
+      if (!batch.assignedTreeIds.includes(snapshot.id)) {
+        get().assignTreeToBatch(batch.id, snapshot.id);
+      }
+    }
   },
 
   createBatch: (topicId, name, description = '', deadline = null) => {
@@ -417,7 +440,7 @@ export const useStore = create<AppState>((set, get) => ({
     const code = rawCode.trim();
     const decoded = decodeFeedbackCode(code);
     if (!decoded) {
-      return { code, status: 'failed', message: '反馈码无效' };
+      return { code, status: 'failed', message: '反馈码无效' } as ImportCodeResult;
     }
     const feedback: PlaybackFeedback = {
       treeId: decoded.treeId,
@@ -426,11 +449,25 @@ export const useStore = create<AppState>((set, get) => ({
       reviewerName: decoded.reviewerName || undefined,
     };
     const isDup = get().isFeedbackDuplicate(feedback);
-    if (isDup) {
-      if (decoded.treeSnapshot && !get().trees.find((t) => t.id === decoded.treeSnapshot!.id)) {
+    let treeRecovered = false;
+    if (decoded.treeSnapshot) {
+      const existingTree = get().trees.find((t) => t.id === decoded.treeSnapshot!.id);
+      if (!existingTree) {
         get().importTreeSnapshot(decoded.treeSnapshot);
+        treeRecovered = true;
       }
-      return { code, status: 'skipped', message: '重复反馈已跳过' };
+    }
+    if (isDup) {
+      const byTree = get().getFeedbacksByTreeId(decoded.treeId);
+      return {
+        code,
+        status: 'skipped',
+        message: `重复反馈已跳过（已有 ${byTree.length} 份）`,
+        treeId: decoded.treeId,
+        topicId: decoded.treeSnapshot?.topicId || get().findAnyTree(decoded.treeId)?.topicId,
+        reviewerName: decoded.reviewerName || '匿名',
+        treeRecovered,
+      } as ImportCodeResult;
     }
     get().importFeedback(feedback, decoded.treeSnapshot || null);
     const byTree = get().getFeedbacksByTreeId(decoded.treeId);
@@ -440,26 +477,49 @@ export const useStore = create<AppState>((set, get) => ({
       code,
       status: 'added',
       message: `${reviewer}: ${ordinal}`,
-    };
+      treeId: decoded.treeId,
+      topicId: decoded.treeSnapshot?.topicId || get().findAnyTree(decoded.treeId)?.topicId,
+      reviewerName: reviewer,
+      treeRecovered,
+    } as ImportCodeResult;
   },
 
   batchImportFeedbackCodes: (codesText) => {
-    const raw = codesText
-      .split(/[\r\n]+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && s.startsWith('FB-'));
+    const lines = codesText.split(/[\r\n]+/).map((s) => s.trim());
+    const validCodes = lines.filter((s) => s.length > 0 && s.startsWith('FB-'));
+    const unparsed: BatchImportResult['unparsed'] = [];
+    for (const line of lines) {
+      if (line.length === 0) continue;
+      if (!line.startsWith('FB-')) {
+        unparsed.push({ line, message: '不是 FB- 开头的有效反馈码' });
+      }
+    }
     const details: BatchImportResult['details'] = [];
     let added = 0, skipped = 0, failed = 0, recovered = 0;
+    const topicIds = new Set<string>();
+    const treeIds = new Set<string>();
     const prevRecoveredBefore = Object.keys(get().recoveredSnapshots).length;
-    for (const code of raw) {
+    for (const code of validCodes) {
       const result = get().importFeedbackCode(code);
-      details.push(result);
+      details.push(result as BatchImportResult['details'][number]);
+      if (result.topicId) topicIds.add(result.topicId);
+      if (result.treeId) treeIds.add(result.treeId);
+      if (result.treeRecovered) recovered++;
       if (result.status === 'added') added++;
       else if (result.status === 'skipped') skipped++;
       else failed++;
     }
     const prevRecoveredAfter = Object.keys(get().recoveredSnapshots).length;
-    recovered = prevRecoveredAfter - prevRecoveredBefore;
-    return { added, skipped, failed, recoveredTrees: recovered, details };
+    recovered = Math.max(recovered, prevRecoveredAfter - prevRecoveredBefore);
+    return {
+      added,
+      skipped,
+      failed,
+      unparsed,
+      recoveredTrees: recovered,
+      affectedTopicIds: Array.from(topicIds),
+      affectedTreeIds: Array.from(treeIds),
+      details,
+    };
   },
 }));
