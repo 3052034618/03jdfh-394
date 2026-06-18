@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '@/store';
-import type { DialogueTree, DialogueNode, PlaybackMode, FearMark } from '@/types';
+import type { DialogueTree, DialogueNode, PlaybackMode, FearMark, FeedbackCode, PlaybackFeedback } from '@/types';
 import { ACT_LABELS } from '@/types';
-import { generateId, decodeTreeFromUrl } from '@/utils';
-import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye } from 'lucide-react';
+import { generateId, decodeTreeFromUrl, encodeFeedbackCode, buildFeedbackCode, decodeFeedbackCode } from '@/utils';
+import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye, Copy, Check, User, Share2 } from 'lucide-react';
 
 interface DisplayItem {
   type: 'node' | 'player-choice';
@@ -13,22 +13,24 @@ interface DisplayItem {
   content: string;
   actId?: string;
   emotionTag?: string;
+  choiceId?: string;
 }
 
 export default function PlaybackPage() {
   const { id: treeId } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const store = useStore();
 
   const [tree, setTree] = useState<DialogueTree | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [mode, setMode] = useState<PlaybackMode>('chat');
   const [showStats, setShowStats] = useState(false);
+  const [showFeedbackBanner, setShowFeedbackBanner] = useState<string | null>(null);
 
-  const [flatNodes, setFlatNodes] = useState<DialogueNode[]>([]);
+  const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
+  const [visitedNodeIds, setVisitedNodeIds] = useState<string[]>([]);
   const [displayItems, setDisplayItems] = useState<DisplayItem[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
   const [isTyping, setIsTyping] = useState(false);
   const [typedChars, setTypedChars] = useState(0);
   const [waitingForChoice, setWaitingForChoice] = useState(false);
@@ -36,48 +38,133 @@ export default function PlaybackPage() {
   const [isComplete, setIsComplete] = useState(false);
   const [subtitleFading, setSubtitleFading] = useState(false);
   const [feedbackSaved, setFeedbackSaved] = useState(false);
+  const [reviewerName, setReviewerName] = useState('');
+  const [generatedFeedbackCode, setGeneratedFeedbackCode] = useState<string>('');
+  const [copiedFeedback, setCopiedFeedback] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [feedbackLink, setFeedbackLink] = useState('');
+  const [isSharedTree, setIsSharedTree] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentNodeAddedRef = useRef(false);
 
-  useEffect(() => {
-    const dataParam = searchParams.get('data');
-    if (dataParam) {
-      const decoded = decodeTreeFromUrl(dataParam);
-      if (decoded && decoded.id && decoded.acts) {
-        setTree(decoded as unknown as DialogueTree);
-        return;
-      }
-    }
-    if (treeId) {
-      const found = store.getTreeById(treeId);
-      if (found) {
-        setTree(found);
-        return;
-      }
-    }
-    setNotFound(true);
-  }, [treeId, searchParams]);
-
-  useEffect(() => {
-    if (!tree) return;
-    const nodes: DialogueNode[] = [];
+  const flatOrderedNodes = useMemo<DialogueNode[]>(() => {
+    if (!tree) return [];
     const sortedActs = [...tree.acts].sort((a, b) => a.order - b.order);
+    const nodes: DialogueNode[] = [];
     for (const act of sortedActs) {
       for (const node of act.nodes) {
         nodes.push(node);
       }
     }
-    setFlatNodes(nodes);
+    return nodes;
   }, [tree]);
 
+  const nodeMap = useMemo<Record<string, DialogueNode>>(() => {
+    const map: Record<string, DialogueNode> = {};
+    for (const node of flatOrderedNodes) {
+      map[node.id] = node;
+    }
+    return map;
+  }, [flatOrderedNodes]);
+
+  const nodeIndexMap = useMemo<Record<string, number>>(() => {
+    const map: Record<string, number> = {};
+    flatOrderedNodes.forEach((node, idx) => {
+      map[node.id] = idx + 1;
+    });
+    return map;
+  }, [flatOrderedNodes]);
+
+  const currentNode = useMemo<DialogueNode | null>(() => {
+    if (!currentNodeId || !nodeMap[currentNodeId]) return null;
+    return nodeMap[currentNodeId];
+  }, [currentNodeId, nodeMap]);
+
+  const getStartingNodeId = useCallback((t: DialogueTree): string | null => {
+    const sortedActs = [...t.acts].sort((a, b) => a.order - b.order);
+    for (const act of sortedActs) {
+      if (act.nodes.length > 0) {
+        return act.nodes[0].id;
+      }
+    }
+    return null;
+  }, []);
+
+  const getNextNodeIdByOrder = useCallback((t: DialogueTree, curNodeId: string): string | null => {
+    const sortedActs = [...t.acts].sort((a, b) => a.order - b.order);
+    const allNodes: DialogueNode[] = [];
+    for (const act of sortedActs) {
+      for (const node of act.nodes) {
+        allNodes.push(node);
+      }
+    }
+    const idx = allNodes.findIndex((n) => n.id === curNodeId);
+    if (idx === -1 || idx >= allNodes.length - 1) return null;
+    return allNodes[idx + 1].id;
+  }, []);
+
   useEffect(() => {
-    if (flatNodes.length === 0) {
+    const dataParam = searchParams.get('data');
+    const feedbackParam = searchParams.get('feedback');
+
+    if (dataParam) {
+      const decoded = decodeTreeFromUrl(dataParam);
+      if (decoded && decoded.id && decoded.acts) {
+        setTree(decoded as unknown as DialogueTree);
+        setIsSharedTree(true);
+      }
+    } else if (treeId) {
+      const found = store.getTreeById(treeId);
+      if (found) {
+        setTree(found);
+      }
+    }
+
+    if (!dataParam && treeId) {
+      const found = store.getTreeById(treeId);
+      if (!found && !dataParam) {
+        setNotFound(true);
+      }
+    }
+
+    if (feedbackParam) {
+      const decodedFb = decodeFeedbackCode(feedbackParam);
+      if (decodedFb) {
+        const fbToAdd: PlaybackFeedback = {
+          treeId: decodedFb.treeId,
+          marks: decodedFb.marks,
+          playedAt: decodedFb.playedAt,
+          reviewerName: decodedFb.reviewerName,
+        };
+        store.addFeedback(fbToAdd);
+        const nameText = decodedFb.reviewerName ? `（来自 ${decodedFb.reviewerName}）` : '';
+        setShowFeedbackBanner(`已自动加载来自分享链接的反馈${nameText}`);
+        if (!dataParam && !treeId) {
+        } else if (decodedFb.treeSnapshot) {
+          if (!dataParam) {
+            setTree(decodedFb.treeSnapshot);
+            setIsSharedTree(true);
+          }
+        }
+      }
+    }
+
+    if (!dataParam && !treeId && !feedbackParam) {
+      setNotFound(true);
+    }
+  }, [treeId, searchParams, store]);
+
+  useEffect(() => {
+    if (!tree) return;
+    const startId = getStartingNodeId(tree);
+    if (!startId) {
       setIsComplete(true);
       return;
     }
-    startNode(0);
-  }, [flatNodes]);
+    setTimeout(() => startNode(startId), 50);
+  }, [tree, getStartingNodeId]);
 
   useEffect(() => {
     if (displayItems.length === 0) return;
@@ -93,8 +180,6 @@ export default function PlaybackPage() {
       }
     };
   }, []);
-
-  const currentNode = currentIndex < flatNodes.length ? flatNodes[currentIndex] : null;
 
   useEffect(() => {
     if (!currentNode || !isTyping) return;
@@ -122,35 +207,26 @@ export default function PlaybackPage() {
     };
   }, [currentNode, isTyping, typedChars, mode]);
 
-  const startNode = useCallback((index: number) => {
-    if (index >= flatNodes.length) {
+  const startNode = useCallback((nodeId: string) => {
+    if (!nodeMap[nodeId]) {
       setIsComplete(true);
       return;
     }
-    setCurrentIndex(index);
+    setCurrentNodeId(nodeId);
+    setVisitedNodeIds((prev) => {
+      if (prev.includes(nodeId)) return prev;
+      return [...prev, nodeId];
+    });
     setTypedChars(0);
     setIsTyping(true);
     setWaitingForChoice(false);
-  }, [flatNodes]);
+    currentNodeAddedRef.current = false;
+  }, [nodeMap]);
 
-  const advanceAfterNode = useCallback((node: DialogueNode) => {
+  const addCurrentNodeToDisplay = useCallback(() => {
+    if (!currentNode || currentNodeAddedRef.current) return;
+    currentNodeAddedRef.current = true;
     const item: DisplayItem = {
-      type: 'node',
-      nodeId: node.id,
-      speaker: node.speaker,
-      content: node.content,
-      actId: node.actId,
-      emotionTag: node.emotionTag,
-    };
-    setDisplayItems((prev) => [...prev, item]);
-    setTimeout(() => {
-      startNode(currentIndex + 1);
-    }, 300);
-  }, [currentIndex, startNode]);
-
-  const handleChoice = useCallback((choiceText: string) => {
-    if (!currentNode) return;
-    const nodeItem: DisplayItem = {
       type: 'node',
       nodeId: currentNode.id,
       speaker: currentNode.speaker,
@@ -158,25 +234,65 @@ export default function PlaybackPage() {
       actId: currentNode.actId,
       emotionTag: currentNode.emotionTag,
     };
+    setDisplayItems((prev) => [...prev, item]);
+  }, [currentNode]);
+
+  const advanceAfterNode = useCallback((node: DialogueNode) => {
+    addCurrentNodeToDisplay();
+    setTimeout(() => {
+      if (!tree) return;
+      const fallback = getNextNodeIdByOrder(tree, node.id);
+      if (fallback && nodeMap[fallback]) {
+        startNode(fallback);
+      } else {
+        setIsComplete(true);
+      }
+    }, 300);
+  }, [tree, getNextNodeIdByOrder, nodeMap, startNode, addCurrentNodeToDisplay]);
+
+  const handleChoice = useCallback((choiceId: string, choiceText: string, nextNodeId: string | null) => {
+    if (!currentNode || !tree) return;
+    addCurrentNodeToDisplay();
+
     const choiceItem: DisplayItem = {
       type: 'player-choice',
       content: choiceText,
+      choiceId,
     };
-    setDisplayItems((prev) => [...prev, nodeItem, choiceItem]);
+    setDisplayItems((prev) => [...prev, choiceItem]);
     setWaitingForChoice(false);
+
+    let targetNodeId: string | null = null;
+    if (nextNodeId && nodeMap[nextNodeId]) {
+      targetNodeId = nextNodeId;
+    } else {
+      const allChoicesHaveNext = currentNode.choices.every((c) => c.nextNodeId && nodeMap[c.nextNodeId]);
+      if (!allChoicesHaveNext) {
+        targetNodeId = getNextNodeIdByOrder(tree, currentNode.id);
+      } else {
+        setIsComplete(true);
+        return;
+      }
+    }
+
+    const goToNode = () => {
+      if (targetNodeId && nodeMap[targetNodeId]) {
+        startNode(targetNodeId);
+      } else {
+        setIsComplete(true);
+      }
+    };
 
     if (mode === 'subtitle') {
       setSubtitleFading(true);
       setTimeout(() => {
         setSubtitleFading(false);
-        startNode(currentIndex + 1);
+        goToNode();
       }, 400);
     } else {
-      setTimeout(() => {
-        startNode(currentIndex + 1);
-      }, 300);
+      setTimeout(goToNode, 300);
     }
-  }, [currentNode, mode, startNode]);
+  }, [currentNode, tree, nodeMap, mode, startNode, getNextNodeIdByOrder, addCurrentNodeToDisplay]);
 
   const handleDoubleClick = useCallback((nodeId: string) => {
     setFearMarks((prev) => {
@@ -188,7 +304,8 @@ export default function PlaybackPage() {
 
   const handleRestart = useCallback(() => {
     setDisplayItems([]);
-    setCurrentIndex(0);
+    setCurrentNodeId(null);
+    setVisitedNodeIds([]);
     setTypedChars(0);
     setIsTyping(false);
     setWaitingForChoice(false);
@@ -196,24 +313,87 @@ export default function PlaybackPage() {
     setIsComplete(false);
     setFeedbackSaved(false);
     setSubtitleFading(false);
-    if (flatNodes.length > 0) {
-      startNode(0);
+    setGeneratedFeedbackCode('');
+    setFeedbackLink('');
+    setCopiedFeedback(false);
+    setCopiedLink(false);
+    setReviewerName('');
+    currentNodeAddedRef.current = false;
+    if (tree) {
+      const startId = getStartingNodeId(tree);
+      if (startId) {
+        setTimeout(() => startNode(startId), 50);
+      }
     }
-  }, [flatNodes, startNode]);
+  }, [tree, getStartingNodeId, startNode]);
 
   const handleSaveFeedback = useCallback(() => {
     if (!tree || feedbackSaved) return;
-    store.addFeedback({
+
+    const fb: PlaybackFeedback = {
       treeId: tree.id,
       marks: fearMarks,
       playedAt: Date.now(),
-    });
-    setFeedbackSaved(true);
-  }, [tree, fearMarks, feedbackSaved, store]);
+      reviewerName: reviewerName.trim() || undefined,
+    };
+    store.addFeedback(fb);
 
-  const topicTitle = tree
-    ? store.topics.find((t) => t.id === tree.topicId)?.title || '未知场景'
-    : '';
+    const feedbackCodeObj = buildFeedbackCode(tree, fb, reviewerName.trim());
+    const code = encodeFeedbackCode(feedbackCodeObj);
+    setGeneratedFeedbackCode(code);
+
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    const link = `${baseUrl}?feedback=${encodeURIComponent(code)}`;
+    setFeedbackLink(link);
+
+    setFeedbackSaved(true);
+  }, [tree, fearMarks, feedbackSaved, reviewerName, store]);
+
+  const handleCopyFeedback = useCallback(async () => {
+    if (!generatedFeedbackCode) return;
+    try {
+      await navigator.clipboard.writeText(generatedFeedbackCode);
+      setCopiedFeedback(true);
+      setTimeout(() => setCopiedFeedback(false), 2000);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = generatedFeedbackCode;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopiedFeedback(true);
+      setTimeout(() => setCopiedFeedback(false), 2000);
+    }
+  }, [generatedFeedbackCode]);
+
+  const handleCopyLink = useCallback(async () => {
+    if (!feedbackLink) return;
+    try {
+      await navigator.clipboard.writeText(feedbackLink);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = feedbackLink;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    }
+  }, [feedbackLink]);
+
+  const topicTitle = useMemo(() => {
+    if (!tree) return '';
+    const topic = store.topics.find((t) => t.id === tree.topicId);
+    if (topic) return topic.title;
+    if (isSharedTree) return '共享对白';
+    return '未知场景';
+  }, [tree, store.topics, isSharedTree]);
+
+  const hasContent = flatOrderedNodes.length > 0;
 
   if (notFound) {
     return (
@@ -236,6 +416,21 @@ export default function PlaybackPage() {
 
   return (
     <div className="min-h-screen bg-horror-bg flex flex-col">
+      {showFeedbackBanner && (
+        <div className="flex items-center justify-between border-b border-horror-rust/30 bg-horror-rust/10 px-4 py-2 text-sm">
+          <span className="flex items-center gap-2 text-horror-rust-light">
+            <Flame className="h-4 w-4" />
+            {showFeedbackBanner}
+          </span>
+          <button
+            className="text-horror-muted hover:text-horror-text"
+            onClick={() => setShowFeedbackBanner(null)}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       <TopBar
         mode={mode}
         onModeChange={setMode}
@@ -257,6 +452,7 @@ export default function PlaybackPage() {
             onChoice={handleChoice}
             onDoubleClick={handleDoubleClick}
             chatEndRef={chatEndRef}
+            nodeIndexMap={nodeIndexMap}
           />
         ) : (
           <SubtitleView
@@ -268,6 +464,7 @@ export default function PlaybackPage() {
             fading={subtitleFading}
             onChoice={handleChoice}
             onDoubleClick={handleDoubleClick}
+            nodeIndexMap={nodeIndexMap}
           />
         )}
 
@@ -275,16 +472,25 @@ export default function PlaybackPage() {
           <EndScreen
             fearMarkCount={fearMarks.length}
             feedbackSaved={feedbackSaved}
+            generatedFeedbackCode={generatedFeedbackCode}
+            feedbackLink={feedbackLink}
+            reviewerName={reviewerName}
+            onReviewerNameChange={setReviewerName}
             onSave={handleSaveFeedback}
             onRestart={handleRestart}
             onBack={() => navigate('/')}
-            hasContent={flatNodes.length > 0}
+            hasContent={hasContent}
+            onCopyFeedback={handleCopyFeedback}
+            onCopyLink={handleCopyLink}
+            copiedFeedback={copiedFeedback}
+            copiedLink={copiedLink}
           />
         )}
 
         {showStats && (
           <StatsPanel
             treeId={tree.id}
+            treeSnapshot={isSharedTree ? tree : null}
             onClose={() => setShowStats(false)}
           />
         )}
@@ -355,6 +561,7 @@ function ChatView({
   onChoice,
   onDoubleClick,
   chatEndRef,
+  nodeIndexMap,
 }: {
   displayItems: DisplayItem[];
   currentNode: DialogueNode | null;
@@ -363,9 +570,10 @@ function ChatView({
   waitingForChoice: boolean;
   fearMarks: FearMark[];
   topicTitle: string;
-  onChoice: (text: string) => void;
+  onChoice: (choiceId: string, text: string, nextNodeId: string | null) => void;
   onDoubleClick: (nodeId: string) => void;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
+  nodeIndexMap: Record<string, number>;
 }) {
   const markedNodeIds = new Set(fearMarks.map((m) => m.nodeId));
 
@@ -394,6 +602,7 @@ function ChatView({
             }
 
             const isMarked = item.nodeId ? markedNodeIds.has(item.nodeId) : false;
+            const nodeNum = item.nodeId ? nodeIndexMap[item.nodeId] : null;
 
             if (item.speaker === 'narrator') {
               return (
@@ -403,6 +612,11 @@ function ChatView({
                   style={{ animationDelay: `${i * 30}ms` }}
                   onDoubleClick={() => item.nodeId && onDoubleClick(item.nodeId)}
                 >
+                  {nodeNum && (
+                    <span className="mb-1 inline-block text-[10px] font-mono text-horror-muted/40">
+                      #{nodeNum}
+                    </span>
+                  )}
                   <p className="mx-auto max-w-[90%] text-xs italic text-horror-muted/70">
                     {item.content}
                   </p>
@@ -423,6 +637,11 @@ function ChatView({
                 <div
                   className={`max-w-[80%] rounded-2xl rounded-tl-sm bg-horror-panel px-4 py-2.5 text-sm text-horror-text ${isMarked ? 'animate-pulse-rust' : ''}`}
                 >
+                  {nodeNum && (
+                    <span className="mr-1.5 text-[10px] font-mono text-horror-muted/40">
+                      #{nodeNum}
+                    </span>
+                  )}
                   {item.content}
                   {isMarked && (
                     <Skull className="ml-1 inline h-3 w-3 text-horror-rust" />
@@ -438,6 +657,7 @@ function ChatView({
               typedChars={typedChars}
               isMarked={markedNodeIds.has(currentNode.id)}
               onDoubleClick={onDoubleClick}
+              nodeNum={nodeIndexMap[currentNode.id]}
             />
           )}
 
@@ -451,9 +671,10 @@ function ChatView({
                 <button
                   key={choice.id}
                   className="rounded-full border-2 border-horror-rust/30 px-4 py-2 text-sm text-horror-text transition-all hover:border-horror-rust/60 hover:bg-horror-rust/10 active:scale-95"
-                  onClick={() => onChoice(choice.text)}
+                  onClick={() => onChoice(choice.id, choice.text, choice.nextNodeId)}
                 >
                   {choice.text}
+                  <ChevronRight className="ml-1 inline h-3 w-3 opacity-50" />
                 </button>
               ))}
             </div>
@@ -469,11 +690,13 @@ function CurrentChatBubble({
   typedChars,
   isMarked,
   onDoubleClick,
+  nodeNum,
 }: {
   node: DialogueNode;
   typedChars: number;
   isMarked: boolean;
   onDoubleClick: (nodeId: string) => void;
+  nodeNum?: number;
 }) {
   const displayText = node.content.slice(0, typedChars);
   const isComplete = typedChars >= node.content.length;
@@ -484,6 +707,11 @@ function CurrentChatBubble({
         className="text-center animate-slide-in-up"
         onDoubleClick={() => onDoubleClick(node.id)}
       >
+        {nodeNum && (
+          <span className="mb-1 inline-block text-[10px] font-mono text-horror-muted/40">
+            #{nodeNum}
+          </span>
+        )}
         <p className="mx-auto max-w-[90%] text-xs italic text-horror-muted/70">
           {displayText}
           {!isComplete && <span className="animate-typewriter">|</span>}
@@ -501,6 +729,11 @@ function CurrentChatBubble({
       <div
         className={`max-w-[80%] rounded-2xl rounded-tl-sm bg-horror-panel px-4 py-2.5 text-sm text-horror-text ${isMarked ? 'animate-pulse-rust' : ''}`}
       >
+        {nodeNum && (
+          <span className="mr-1.5 text-[10px] font-mono text-horror-muted/40">
+            #{nodeNum}
+          </span>
+        )}
         {displayText}
         {!isComplete && <span className="animate-typewriter">|</span>}
         {isMarked && <Skull className="ml-1 inline h-3 w-3 text-horror-rust" />}
@@ -518,6 +751,7 @@ function SubtitleView({
   fading,
   onChoice,
   onDoubleClick,
+  nodeIndexMap,
 }: {
   currentNode: DialogueNode | null;
   isTyping: boolean;
@@ -525,8 +759,9 @@ function SubtitleView({
   waitingForChoice: boolean;
   fearMarks: FearMark[];
   fading: boolean;
-  onChoice: (text: string) => void;
+  onChoice: (choiceId: string, text: string, nextNodeId: string | null) => void;
   onDoubleClick: (nodeId: string) => void;
+  nodeIndexMap: Record<string, number>;
 }) {
   const markedNodeIds = new Set(fearMarks.map((m) => m.nodeId));
   if (!currentNode) return null;
@@ -534,6 +769,7 @@ function SubtitleView({
   const displayText = currentNode.content.slice(0, typedChars);
   const isComplete = typedChars >= currentNode.content.length;
   const isMarked = markedNodeIds.has(currentNode.id);
+  const nodeNum = nodeIndexMap[currentNode.id];
 
   return (
     <div
@@ -541,6 +777,11 @@ function SubtitleView({
       onDoubleClick={() => onDoubleClick(currentNode.id)}
     >
       <div className="max-w-2xl text-center">
+        {nodeNum && (
+          <p className="mb-1 font-mono text-xs text-horror-muted/40">
+            NODE #{nodeNum}
+          </p>
+        )}
         {currentNode.speaker === 'narrator' ? (
           <p className="mb-2 text-xs uppercase tracking-widest text-horror-muted/50">
             旁白
@@ -567,9 +808,10 @@ function SubtitleView({
             <button
               key={choice.id}
               className="rounded-full border-2 border-horror-rust/30 px-6 py-2.5 font-mono text-sm text-horror-text transition-all hover:border-horror-rust/60 hover:bg-horror-rust/10 active:scale-95"
-              onClick={() => onChoice(choice.text)}
+              onClick={() => onChoice(choice.id, choice.text, choice.nextNodeId)}
             >
               {choice.text}
+              <ChevronRight className="ml-1 inline h-3 w-3 opacity-50" />
             </button>
           ))}
         </div>
@@ -581,26 +823,42 @@ function SubtitleView({
 function EndScreen({
   fearMarkCount,
   feedbackSaved,
+  generatedFeedbackCode,
+  feedbackLink,
+  reviewerName,
+  onReviewerNameChange,
   onSave,
   onRestart,
   onBack,
   hasContent = true,
+  onCopyFeedback,
+  onCopyLink,
+  copiedFeedback,
+  copiedLink,
 }: {
   fearMarkCount: number;
   feedbackSaved: boolean;
+  generatedFeedbackCode: string;
+  feedbackLink: string;
+  reviewerName: string;
+  onReviewerNameChange: (v: string) => void;
   onSave: () => void;
   onRestart: () => void;
   onBack: () => void;
   hasContent?: boolean;
+  onCopyFeedback: () => void;
+  onCopyLink: () => void;
+  copiedFeedback: boolean;
+  copiedLink: boolean;
 }) {
   return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-horror-bg/90 backdrop-blur-sm animate-fade-in">
-      <div className="text-center">
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-horror-bg/90 backdrop-blur-sm animate-fade-in overflow-y-auto py-8">
+      <div className="text-center max-w-md w-full px-4">
         <Skull className="mx-auto mb-6 h-16 w-16 text-horror-rust animate-glow" />
         {hasContent ? (
           <>
             <h2 className="mb-4 font-creep text-4xl text-horror-rust">体验结束</h2>
-            <p className="mb-8 flex items-center justify-center gap-2 text-horror-muted">
+            <p className="mb-6 flex items-center justify-center gap-2 text-horror-muted">
               <Eye className="h-4 w-4" />
               你标记了 <span className="font-medium text-horror-rust-light">{fearMarkCount}</span> 处恐惧点
             </p>
@@ -608,25 +866,128 @@ function EndScreen({
         ) : (
           <>
             <h2 className="mb-4 font-creep text-4xl text-horror-rust">空空如也</h2>
-            <p className="mb-8 text-horror-muted">这个对白树还没有内容</p>
+            <p className="mb-6 text-horror-muted">这个对白树还没有内容</p>
           </>
         )}
+
+        {hasContent && (
+          <div className="mb-6">
+            <label className="mb-2 block text-left text-xs text-horror-muted">
+              <User className="mr-1 inline h-3 w-3" />
+              你的称呼（可选）
+            </label>
+            <input
+              type="text"
+              value={reviewerName}
+              onChange={(e) => onReviewerNameChange(e.target.value)}
+              placeholder="输入名字让老师知道是谁的反馈"
+              className="w-full rounded-lg border border-horror-border bg-horror-panel px-4 py-2.5 text-sm text-horror-text placeholder:text-horror-muted/40 focus:border-horror-rust/50 focus:outline-none"
+              disabled={feedbackSaved}
+            />
+          </div>
+        )}
+
         <div className="flex flex-col items-center gap-3">
           {hasContent && (
             <button
-              className="horror-btn-primary w-48"
+              className="horror-btn-primary w-full max-w-xs"
               onClick={onSave}
               disabled={feedbackSaved}
             >
-              {feedbackSaved ? '反馈已保存' : '保存反馈'}
+              {feedbackSaved ? (
+                <>
+                  <Check className="mr-2 inline h-4 w-4" />
+                  反馈已保存
+                </>
+              ) : (
+                '保存反馈'
+              )}
             </button>
           )}
-          <button
-            className="horror-btn-ghost w-48"
-            onClick={onBack}
-          >
-            返回题目
-          </button>
+
+          {feedbackSaved && generatedFeedbackCode && (
+            <div className="animate-slide-in-up w-full space-y-4 mt-4">
+              {feedbackSaved && !generatedFeedbackCode.startsWith('FB-FAILED') && (
+                <div className="rounded-lg border border-horror-rust/30 bg-horror-rust/5 px-3 py-2 text-xs text-horror-rust-light animate-fade-in">
+                  <Flame className="mr-1 inline h-3 w-3" />
+                  反馈已生成，把反馈码发给老师就可以看到啦
+                </div>
+              )}
+
+              <div>
+                <label className="mb-2 block text-left text-xs text-horror-muted">
+                  反馈码
+                </label>
+                <div className="rounded-lg border border-horror-border bg-horror-panel p-3">
+                  <textarea
+                    readOnly
+                    value={generatedFeedbackCode}
+                    className="block w-full resize-none border-0 bg-transparent p-0 text-xs font-mono text-horror-muted focus:outline-none"
+                    rows={4}
+                  />
+                </div>
+                <button
+                  className="horror-btn mt-2 w-full max-w-xs text-xs"
+                  onClick={onCopyFeedback}
+                >
+                  {copiedFeedback ? (
+                    <>
+                      <Check className="mr-1.5 h-3.5 w-3.5 text-horror-rust-light" />
+                      已复制反馈码
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="mr-1.5 h-3.5 w-3.5" />
+                      复制反馈码
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-left text-xs text-horror-muted">
+                  <Share2 className="mr-1 inline h-3 w-3" />
+                  反馈链接
+                </label>
+                <div className="rounded-lg border border-horror-border bg-horror-panel p-3">
+                  <p className="break-all text-xs text-horror-muted/80 line-clamp-2">
+                    {feedbackLink}
+                  </p>
+                </div>
+                <button
+                  className="horror-btn mt-2 w-full max-w-xs text-xs"
+                  onClick={onCopyLink}
+                >
+                  {copiedLink ? (
+                    <>
+                      <Check className="mr-1.5 h-3.5 w-3.5 text-horror-rust-light" />
+                      已复制链接
+                    </>
+                  ) : (
+                    <>
+                      <Share2 className="mr-1.5 h-3.5 w-3.5" />
+                      生成反馈链接
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-2">
+            <button
+              className="horror-btn-ghost flex-1 max-w-[140px]"
+              onClick={onRestart}
+            >
+              重新体验
+            </button>
+            <button
+              className="horror-btn-ghost flex-1 max-w-[140px]"
+              onClick={onBack}
+            >
+              返回题目
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -635,14 +996,16 @@ function EndScreen({
 
 function StatsPanel({
   treeId,
+  treeSnapshot,
   onClose,
 }: {
   treeId: string;
+  treeSnapshot: DialogueTree | null;
   onClose: () => void;
 }) {
   const feedbacks = useStore((s) => s.getFeedbacksByTreeId(treeId));
   const trees = useStore((s) => s.trees);
-  const tree = trees.find((t) => t.id === treeId);
+  const tree = trees.find((t) => t.id === treeId) || treeSnapshot;
 
   const nodeMarkCounts: Record<string, { text: string; count: number }> = {};
   for (const fb of feedbacks) {
@@ -665,8 +1028,23 @@ function StatsPanel({
     }
   }
 
+  const fbCodesWithTextMap: FeedbackCode[] = [];
+  const nodeTextMapFromCodes: Record<string, string> = {};
+  for (const fb of feedbacks) {
+    try {
+    } catch {
+    }
+  }
+
+  for (const nodeId of Object.keys(nodeMarkCounts)) {
+    if (!nodeMarkCounts[nodeId].text && nodeTextMapFromCodes[nodeId]) {
+      nodeMarkCounts[nodeId].text = nodeTextMapFromCodes[nodeId];
+    }
+  }
+
   const entries = Object.entries(nodeMarkCounts).filter(([, v]) => v.text);
   const maxCount = Math.max(1, ...entries.map(([, v]) => v.count));
+  const totalFearMarks = entries.reduce((sum, [, v]) => sum + v.count, 0);
 
   return (
     <div className="absolute right-0 top-0 z-20 flex h-full w-80 flex-col border-l border-horror-border bg-horror-surface shadow-2xl animate-slide-in-right">
@@ -681,9 +1059,16 @@ function StatsPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        <p className="mb-3 text-xs text-horror-muted">
-          共 {feedbacks.length} 份反馈
-        </p>
+        <div className="mb-3 flex gap-2 text-xs text-horror-muted">
+          <span className="flex items-center gap-1">
+            <Eye className="h-3 w-3" />
+            共 {feedbacks.length} 份反馈
+          </span>
+          <span className="flex items-center gap-1 text-horror-rust-light">
+            <Flame className="h-3 w-3" />
+            {totalFearMarks} 处恐惧标记
+          </span>
+        </div>
 
         {entries.length === 0 ? (
           <p className="py-8 text-center text-sm text-horror-muted/50">

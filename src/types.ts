@@ -1,5 +1,15 @@
 export type ActType = 'opening' | 'anomaly' | 'collapse';
 
+export interface FeedbackCode {
+  version: number;
+  treeId: string;
+  treeSnapshot: DialogueTree | null;
+  marks: FearMark[];
+  playedAt: number;
+  reviewerName: string;
+  nodeTextMap: Record<string, string>;
+}
+
 export interface PlayerChoice {
   id: string;
   text: string;
@@ -48,6 +58,7 @@ export interface PlaybackFeedback {
   treeId: string;
   marks: FearMark[];
   playedAt: number;
+  reviewerName?: string;
 }
 
 export interface HintItem {
@@ -57,9 +68,17 @@ export interface HintItem {
   message: string;
   actId?: string;
   nodeId?: string;
+  choiceId?: string;
 }
 
 export type PlaybackMode = 'chat' | 'subtitle';
+
+export interface TopicStats {
+  topic: Topic;
+  trees: DialogueTree[];
+  totalFeedbacks: number;
+  totalMarks: number;
+}
 
 export const ACT_LABELS: Record<ActType, string> = {
   opening: '开场寒暄',

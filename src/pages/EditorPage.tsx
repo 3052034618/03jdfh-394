@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '@/store';
 import { ActType, DialogueNode, PlayerChoice, ACT_LABELS, ACT_DESCRIPTIONS } from '@/types';
-import type { HintItem } from '@/types';
-import { generateId, encodeTreeToUrl } from '@/utils';
+import type { HintItem, PlaybackFeedback } from '@/types';
+import { generateId, encodeTreeToUrl, decodeFeedbackCode } from '@/utils';
 import { analyzeDialogueTree } from '@/analyze';
 import {
   Plus,
@@ -19,6 +19,10 @@ import {
   Ghost,
   Brain,
   Zap,
+  GitBranch,
+  Copy,
+  Download,
+  Check,
 } from 'lucide-react';
 
 const ACT_ORDER: ActType[] = ['opening', 'anomaly', 'collapse'];
@@ -37,6 +41,18 @@ export default function EditorPage() {
 
   const [currentAct, setCurrentAct] = useState<ActType>('opening');
   const [showHints, setShowHints] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [authorName, setAuthorName] = useState('');
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importCode, setImportCode] = useState('');
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  const showToast = useCallback((type: 'success' | 'error', message: string) => {
+    setToast({ type, message });
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const tree = useMemo(() => {
     if (!paramId) return undefined;
@@ -58,6 +74,12 @@ export default function EditorPage() {
     }
   }, [paramId, tree, store.topics]);
 
+  useEffect(() => {
+    if (tree) {
+      setAuthorName(tree.authorName || '');
+    }
+  }, [tree?.id, tree?.authorName]);
+
   const currentActData = useMemo(() => {
     if (!tree) return undefined;
     return tree.acts.find((a) => a.type === currentAct);
@@ -73,6 +95,43 @@ export default function EditorPage() {
     [tree]
   );
 
+  const allNodesWithGlobalIndex = useMemo(() => {
+    if (!tree) return [] as { node: DialogueNode; globalIndex: number; actType: ActType }[];
+    const result: { node: DialogueNode; globalIndex: number; actType: ActType }[] = [];
+    let idx = 0;
+    for (const actType of ACT_ORDER) {
+      const act = tree.acts.find((a) => a.type === actType);
+      if (act) {
+        for (const node of act.nodes) {
+          idx++;
+          result.push({ node, globalIndex: idx, actType });
+        }
+      }
+    }
+    return result;
+  }, [tree]);
+
+  const nodeGlobalIndexMap = useMemo(() => {
+    const map: Record<string, { globalIndex: number; node: DialogueNode; actType: ActType }> = {};
+    for (const item of allNodesWithGlobalIndex) {
+      map[item.node.id] = { globalIndex: item.globalIndex, node: item.node, actType: item.actType };
+    }
+    return map;
+  }, [allNodesWithGlobalIndex]);
+
+  const groupedNodeOptions = useMemo(() => {
+    if (!tree) return {} as Record<ActType, { node: DialogueNode; globalIndex: number }[]>;
+    const groups: Record<ActType, { node: DialogueNode; globalIndex: number }[]> = {
+      opening: [],
+      anomaly: [],
+      collapse: [],
+    };
+    for (const item of allNodesWithGlobalIndex) {
+      groups[item.actType].push({ node: item.node, globalIndex: item.globalIndex });
+    }
+    return groups;
+  }, [allNodesWithGlobalIndex]);
+
   const hints = useMemo(() => {
     if (!tree) return [];
     return analyzeDialogueTree(tree);
@@ -86,6 +145,16 @@ export default function EditorPage() {
     }
     return groups;
   }, [hints]);
+
+  const handleAuthorChange = useCallback(
+    (val: string) => {
+      setAuthorName(val);
+      if (tree) {
+        store.updateTree(tree.id, { authorName: val });
+      }
+    },
+    [tree, store]
+  );
 
   const handleAddNode = useCallback(() => {
     if (!tree || !currentActData) return;
@@ -160,12 +229,37 @@ export default function EditorPage() {
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
   }, [tree]);
 
   const handlePreview = useCallback(() => {
     if (!tree) return;
     navigate(`/play/${tree.id}`);
   }, [tree, navigate]);
+
+  const handleImportFeedback = useCallback(() => {
+    if (!tree) return;
+    const decoded = decodeFeedbackCode(importCode.trim());
+    if (!decoded) {
+      showToast('error', '反馈码格式无效');
+      return;
+    }
+    try {
+      const playbackFeedback: PlaybackFeedback = {
+        treeId: decoded.treeId,
+        marks: decoded.marks,
+        playedAt: decoded.playedAt,
+        reviewerName: decoded.reviewerName,
+      };
+      store.importFeedback(playbackFeedback, decoded.treeSnapshot);
+      showToast('success', '反馈导入成功');
+      setShowImportModal(false);
+      setImportCode('');
+    } catch {
+      showToast('error', '导入失败，请重试');
+    }
+  }, [tree, importCode, store, showToast]);
 
   if (!tree) {
     return (
@@ -178,8 +272,31 @@ export default function EditorPage() {
     );
   }
 
+  const actOptionLabels: Record<ActType, string> = {
+    opening: '开场寒暄',
+    anomaly: '异常暗示',
+    collapse: '认知崩塌',
+  };
+
   return (
     <div className="flex flex-col h-screen bg-horror-bg overflow-hidden">
+      {toast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-slide-in-up">
+          <div
+            className={`horror-card px-4 py-2.5 flex items-center gap-2 text-sm ${
+              toast.type === 'success' ? 'text-horror-success' : 'text-horror-danger'
+            }`}
+          >
+            {toast.type === 'success' ? (
+              <CheckCircle className="w-4 h-4" />
+            ) : (
+              <XCircle className="w-4 h-4" />
+            )}
+            {toast.message}
+          </div>
+        </div>
+      )}
+
       <header className="flex items-center justify-between px-4 py-3 border-b border-horror-border bg-horror-surface shrink-0">
         <div className="flex items-center gap-3">
           <button
@@ -205,12 +322,33 @@ export default function EditorPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden md:flex items-center gap-1.5">
+            <span className="text-[11px] text-horror-muted shrink-0">作者</span>
+            <input
+              type="text"
+              value={authorName}
+              onChange={(e) => handleAuthorChange(e.target.value)}
+              placeholder="填写作者名"
+              className="horror-input !py-1 !px-2 !text-xs w-28"
+            />
+          </div>
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="horror-btn-ghost flex items-center gap-1.5 px-3 py-1.5 text-sm"
+          >
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">导入反馈</span>
+          </button>
           <button
             onClick={handleShare}
             className="horror-btn-ghost flex items-center gap-1.5 px-3 py-1.5 text-sm"
           >
-            <Share2 className="w-4 h-4" />
-            <span className="hidden sm:inline">分享</span>
+            {copied ? (
+              <Check className="w-4 h-4 text-horror-success" />
+            ) : (
+              <Share2 className="w-4 h-4" />
+            )}
+            <span className="hidden sm:inline">{copied ? '已复制' : '分享'}</span>
           </button>
           <button
             onClick={handlePreview}
@@ -221,6 +359,17 @@ export default function EditorPage() {
           </button>
         </div>
       </header>
+
+      <div className="md:hidden px-4 py-2 border-b border-horror-border bg-horror-surface/50 flex items-center gap-1.5">
+        <span className="text-[11px] text-horror-muted shrink-0">作者</span>
+        <input
+          type="text"
+          value={authorName}
+          onChange={(e) => handleAuthorChange(e.target.value)}
+          placeholder="填写作者名"
+          className="horror-input !py-1 !px-2 !text-xs flex-1"
+        />
+      </div>
 
       <div className="flex items-center px-4 py-3 border-b border-horror-border bg-horror-surface/50 shrink-0 overflow-x-auto">
         {ACT_ORDER.map((actType, index) => {
@@ -292,6 +441,25 @@ export default function EditorPage() {
                   <p className="text-[10px] text-horror-muted mt-1">
                     {ACT_DESCRIPTIONS[act.type]}
                   </p>
+                  {act.nodes.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {act.nodes.map((node, i) => {
+                        const globalIdx = nodeGlobalIndexMap[node.id]?.globalIndex || i + 1;
+                        return (
+                          <div
+                            key={node.id}
+                            className="text-[10px] text-horror-muted/70 bg-horror-bg/40 rounded px-2 py-1 truncate"
+                          >
+                            <span className="text-horror-rust/70 font-mono mr-1">
+                              #{globalIdx}
+                            </span>
+                            {node.content.slice(0, 25) || '(空)'}
+                            {node.content.length > 25 && '...'}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </button>
               ))}
             </div>
@@ -317,139 +485,227 @@ export default function EditorPage() {
             </div>
 
             <div className="space-y-4">
-              {currentActData?.nodes.map((node, nodeIndex) => (
-                <div
-                  key={node.id}
-                  className="horror-card animate-slide-in-up"
-                  style={{ animationDelay: `${nodeIndex * 50}ms` }}
-                >
+              {currentActData?.nodes.map((node, nodeIndex) => {
+                const globalNodeIdx =
+                  nodeGlobalIndexMap[node.id]?.globalIndex || nodeIndex + 1;
+                return (
                   <div
-                    className={`${
-                      node.speaker === 'npc'
-                        ? 'border-l-2 border-l-horror-muted pl-4'
-                        : 'pl-4'
-                    }`}
+                    key={node.id}
+                    className="horror-card animate-slide-in-up"
+                    style={{ animationDelay: `${nodeIndex * 50}ms` }}
                   >
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() =>
-                            handleUpdateNode(node.id, {
-                              speaker: node.speaker === 'npc' ? 'narrator' : 'npc',
-                            })
-                          }
-                          className={`px-3 py-1 rounded-md text-xs font-medium transition-all duration-200 ${
-                            node.speaker === 'npc'
-                              ? 'bg-horror-muted/20 text-horror-muted'
-                              : 'bg-horror-panel text-horror-muted italic'
-                          }`}
-                        >
-                          {node.speaker === 'npc' ? 'NPC' : '旁白'}
-                        </button>
-                        <span className="text-xs text-horror-muted/50">
-                          #{nodeIndex + 1}
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => handleRemoveNode(node.id)}
-                        className="p-1.5 rounded-md text-horror-muted/50 hover:text-horror-danger hover:bg-horror-danger/10 transition-all duration-200"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    <textarea
-                      value={node.content}
-                      onChange={(e) =>
-                        handleUpdateNode(node.id, { content: e.target.value })
-                      }
-                      placeholder={
+                    <div
+                      className={`${
                         node.speaker === 'npc'
-                          ? '输入NPC对白...'
-                          : '输入旁白描写...'
-                      }
-                      rows={3}
-                      className={`horror-input resize-y min-h-[80px] ${
-                        node.speaker === 'narrator' ? 'italic' : ''
+                          ? 'border-l-2 border-l-horror-muted pl-4'
+                          : 'pl-4'
                       }`}
-                    />
-
-                    <div className="mt-3 flex items-center gap-2">
-                      <Zap className="w-3.5 h-3.5 text-horror-warning/60" />
-                      <input
-                        type="text"
-                        value={node.emotionTag}
-                        onChange={(e) =>
-                          handleUpdateNode(node.id, { emotionTag: e.target.value })
-                        }
-                        placeholder="情绪标签（可选）"
-                        className="horror-input !py-1.5 !px-3 !text-xs flex-1 max-w-[200px]"
-                      />
-                    </div>
-
-                    {node.speaker === 'npc' && (
-                      <div className="mt-4 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-horror-muted font-medium">
-                            玩家选项
-                          </span>
-                          <span className="text-[10px] text-horror-muted/50">
-                            {node.choices.length}/3
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              handleUpdateNode(node.id, {
+                                speaker: node.speaker === 'npc' ? 'narrator' : 'npc',
+                              })
+                            }
+                            className={`px-3 py-1 rounded-md text-xs font-medium transition-all duration-200 ${
+                              node.speaker === 'npc'
+                                ? 'bg-horror-muted/20 text-horror-muted'
+                                : 'bg-horror-panel text-horror-muted italic'
+                            }`}
+                          >
+                            {node.speaker === 'npc' ? 'NPC' : '旁白'}
+                          </button>
+                          <span className="text-xs text-horror-muted/50 font-mono">
+                            #{globalNodeIdx}
                           </span>
                         </div>
-
-                        {node.choices.map((choice) => (
-                          <div
-                            key={choice.id}
-                            className="border-l-2 border-l-horror-rust/40 pl-3 py-2 space-y-2"
-                          >
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={choice.text}
-                                onChange={(e) =>
-                                  handleUpdateChoice(node.id, choice.id, {
-                                    text: e.target.value,
-                                  })
-                                }
-                                placeholder="选项文本"
-                                className="horror-input !py-1.5 !px-3 !text-xs flex-1"
-                              />
-                              <button
-                                onClick={() => handleRemoveChoice(node.id, choice.id)}
-                                className="p-1 rounded text-horror-muted/50 hover:text-horror-danger transition-colors shrink-0"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <input
-                              type="text"
-                              value={choice.emotionConsequence}
-                              onChange={(e) =>
-                                handleUpdateChoice(node.id, choice.id, {
-                                  emotionConsequence: e.target.value,
-                                })
-                              }
-                              placeholder="情绪后果"
-                              className="horror-input !py-1.5 !px-3 !text-xs w-full"
-                            />
-                          </div>
-                        ))}
-
-                        {node.choices.length < 3 && (
-                          <button
-                            onClick={() => handleAddChoice(node.id)}
-                            className="flex items-center gap-1.5 text-xs text-horror-rust/70 hover:text-horror-rust-light transition-colors py-1"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            添加选项
-                          </button>
-                        )}
+                        <button
+                          onClick={() => handleRemoveNode(node.id)}
+                          className="p-1.5 rounded-md text-horror-muted/50 hover:text-horror-danger hover:bg-horror-danger/10 transition-all duration-200"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
-                    )}
+
+                      <textarea
+                        value={node.content}
+                        onChange={(e) =>
+                          handleUpdateNode(node.id, { content: e.target.value })
+                        }
+                        placeholder={
+                          node.speaker === 'npc'
+                            ? '输入NPC对白...'
+                            : '输入旁白描写...'
+                        }
+                        rows={3}
+                        className={`horror-input resize-y min-h-[80px] ${
+                          node.speaker === 'narrator' ? 'italic' : ''
+                        }`}
+                      />
+
+                      <div className="mt-3 flex items-center gap-2">
+                        <Zap className="w-3.5 h-3.5 text-horror-warning/60" />
+                        <input
+                          type="text"
+                          value={node.emotionTag}
+                          onChange={(e) =>
+                            handleUpdateNode(node.id, { emotionTag: e.target.value })
+                          }
+                          placeholder="情绪标签（可选）"
+                          className="horror-input !py-1.5 !px-3 !text-xs flex-1 max-w-[200px]"
+                        />
+                      </div>
+
+                      {node.speaker === 'npc' && (
+                        <div className="mt-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-horror-muted font-medium">
+                              玩家选项
+                            </span>
+                            <span className="text-[10px] text-horror-muted/50">
+                              {node.choices.length}/3
+                            </span>
+                          </div>
+
+                          {node.choices.map((choice, choiceIdx) => {
+                            const hasBranchTarget = !!choice.nextNodeId;
+                            const targetInfo = choice.nextNodeId
+                              ? nodeGlobalIndexMap[choice.nextNodeId]
+                              : null;
+                            return (
+                              <div
+                                key={choice.id}
+                                className={`pl-3 py-2 space-y-2 ${
+                                  hasBranchTarget
+                                    ? 'border-l-2 border-l-horror-rust/50'
+                                    : 'border-l-2 border-l-horror-rust/40'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] text-horror-muted/50 font-mono shrink-0 w-4">
+                                    {choiceIdx + 1}.
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={choice.text}
+                                    onChange={(e) =>
+                                      handleUpdateChoice(node.id, choice.id, {
+                                        text: e.target.value,
+                                      })
+                                    }
+                                    placeholder="选项文本"
+                                    className="horror-input !py-1.5 !px-3 !text-xs flex-1"
+                                  />
+                                  <button
+                                    onClick={() =>
+                                      handleRemoveChoice(node.id, choice.id)
+                                    }
+                                    className="p-1 rounded text-horror-muted/50 hover:text-horror-danger transition-colors shrink-0"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={choice.emotionConsequence}
+                                  onChange={(e) =>
+                                    handleUpdateChoice(node.id, choice.id, {
+                                      emotionConsequence: e.target.value,
+                                    })
+                                  }
+                                  placeholder="情绪后果"
+                                  className="horror-input !py-1.5 !px-3 !text-xs w-full"
+                                />
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <GitBranch
+                                      className={`w-3.5 h-3.5 shrink-0 ${
+                                        hasBranchTarget
+                                          ? 'text-horror-rust-light'
+                                          : 'text-horror-muted/50'
+                                      }`}
+                                    />
+                                    <span className="text-[10px] text-horror-muted/50 shrink-0">
+                                      跳转到
+                                    </span>
+                                    <select
+                                      value={choice.nextNodeId || ''}
+                                      onChange={(e) =>
+                                        handleUpdateChoice(node.id, choice.id, {
+                                          nextNodeId: e.target.value || null,
+                                        })
+                                      }
+                                      className={`horror-input !py-1 !px-2 !text-xs flex-1 appearance-none cursor-pointer ${
+                                        hasBranchTarget
+                                          ? '!border-horror-rust/60 focus:!border-horror-rust-light'
+                                          : ''
+                                      }`}
+                                    >
+                                      <option value="">顺序推进 (默认)</option>
+                                      {(
+                                        Object.keys(groupedNodeOptions) as ActType[]
+                                      ).map((actType) => {
+                                        const optNodes = groupedNodeOptions[actType];
+                                        if (optNodes.length === 0) return null;
+                                        return (
+                                          <optgroup
+                                            key={actType}
+                                            label={actOptionLabels[actType]}
+                                          >
+                                            {optNodes.map(({ node: optNode, globalIndex }) => (
+                                              <option
+                                                key={optNode.id}
+                                                value={optNode.id}
+                                              >
+                                                {`[#${globalIndex}] ${
+                                                  optNode.content.slice(0, 20) ||
+                                                  '(空对白)'
+                                                }${optNode.content.length > 20 ? '...' : ''}`}
+                                              </option>
+                                            ))}
+                                          </optgroup>
+                                        );
+                                      })}
+                                    </select>
+                                  </div>
+                                  {hasBranchTarget && targetInfo && targetInfo.node.content && (
+                                    <div className="flex items-center gap-1 pl-5 text-[10px] text-horror-rust/80 font-mono truncate">
+                                      <span>→</span>
+                                      <span className="truncate">
+                                        #{targetInfo.globalIndex}{' '}
+                                        {targetInfo.node.content.slice(0, 30)}
+                                        {targetInfo.node.content.length > 30 && '...'}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {hasBranchTarget && !targetInfo && (
+                                    <div className="flex items-center gap-1 pl-5 text-[10px] text-horror-danger/80 truncate">
+                                      <XCircle className="w-3 h-3 shrink-0" />
+                                      <span>目标节点已被删除</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          {node.choices.length < 3 && (
+                            <button
+                              onClick={() => handleAddChoice(node.id)}
+                              className="flex items-center gap-1.5 text-xs text-horror-rust/70 hover:text-horror-rust-light transition-colors py-1"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              添加选项
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <button
@@ -618,6 +874,57 @@ export default function EditorPage() {
           </div>
         )}
       </div>
+
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="horror-card w-full max-w-md animate-slide-in-up">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-horror-text font-medium flex items-center gap-2">
+                <Download className="w-4 h-4 text-horror-rust" />
+                导入反馈
+              </h3>
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportCode('');
+                }}
+                className="p-1 rounded text-horror-muted/50 hover:text-horror-text transition-colors"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-horror-muted mb-3">
+              粘贴以 FB- 开头的反馈码，导入测试者的恐惧标记数据
+            </p>
+            <textarea
+              value={importCode}
+              onChange={(e) => setImportCode(e.target.value)}
+              placeholder="FB-xxxxxxxx..."
+              rows={5}
+              className="horror-input resize-none font-mono text-xs w-full"
+            />
+            <div className="flex items-center justify-end gap-2 mt-4">
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportCode('');
+                }}
+                className="horror-btn-ghost px-4 py-2 text-sm"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleImportFeedback}
+                disabled={!importCode.trim()}
+                className="horror-btn-primary px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4" />
+                确认导入
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

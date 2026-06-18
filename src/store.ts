@@ -29,6 +29,9 @@ interface AppState {
   addFeedback: (feedback: PlaybackFeedback) => void;
   addFearMark: (treeId: string, mark: FearMark) => void;
   getFeedbacksByTreeId: (treeId: string) => PlaybackFeedback[];
+
+  importFeedback: (feedback: PlaybackFeedback, treeSnapshot?: DialogueTree | null) => void;
+  importTreeSnapshot: (snapshot: DialogueTree) => void;
 }
 
 function loadFromStorage<T>(key: string, fallback: T): T {
@@ -261,5 +264,34 @@ export const useStore = create<AppState>((set, get) => ({
 
   getFeedbacksByTreeId: (treeId) => {
     return get().feedbacks.filter((fb) => fb.treeId === treeId);
+  },
+
+  importFeedback: (feedback, treeSnapshot) => {
+    if (treeSnapshot) {
+      const existingTree = get().trees.find((t) => t.id === treeSnapshot.id);
+      if (!existingTree) {
+        get().importTreeSnapshot(treeSnapshot);
+      }
+    }
+    set((state) => {
+      const feedbacks = [...state.feedbacks, feedback];
+      saveToStorage('horror-feedbacks', feedbacks);
+      return { feedbacks };
+    });
+  },
+
+  importTreeSnapshot: (snapshot) => {
+    set((state) => {
+      const existingIndex = state.trees.findIndex((t) => t.id === snapshot.id);
+      let trees;
+      if (existingIndex >= 0) {
+        trees = [...state.trees];
+        trees[existingIndex] = snapshot;
+      } else {
+        trees = [...state.trees, snapshot];
+      }
+      saveToStorage('horror-trees', trees);
+      return { trees };
+    });
   },
 }));

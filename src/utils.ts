@@ -1,3 +1,5 @@
+import type { FeedbackCode, DialogueTree, PlaybackFeedback } from '@/types';
+
 export const HORROR_WORDS = [
   '鬼', '死', '血', '影子', '哭声', '黑暗', '腐烂', '尸体', '坟', '墓',
   '棺', '骨', '灵', '魂', '诅咒', '怨', '恨', '杀', '害', '怕',
@@ -40,3 +42,51 @@ export function decodeTreeFromUrl(encoded: string): Record<string, unknown> | nu
     return null;
   }
 }
+
+export function encodeFeedbackCode(feedback: FeedbackCode): string {
+  try {
+    const json = JSON.stringify(feedback);
+    const base64 = btoa(unescape(encodeURIComponent(json)));
+    return `FB-${base64}`;
+  } catch {
+    return '';
+  }
+}
+
+export function decodeFeedbackCode(code: string): FeedbackCode | null {
+  try {
+    if (!code.startsWith('FB-')) return null;
+    const base64 = code.slice(3);
+    const json = decodeURIComponent(escape(atob(base64)));
+    const parsed = JSON.parse(json);
+    if (parsed.version && parsed.treeId && Array.isArray(parsed.marks)) {
+      return parsed as FeedbackCode;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildFeedbackCode(
+  tree: DialogueTree,
+  feedback: PlaybackFeedback,
+  reviewerName: string = '',
+): FeedbackCode {
+  const nodeTextMap: Record<string, string> = {};
+  for (const act of tree.acts) {
+    for (const node of act.nodes) {
+      nodeTextMap[node.id] = node.content;
+    }
+  }
+  return {
+    version: 1,
+    treeId: tree.id,
+    treeSnapshot: tree,
+    marks: feedback.marks,
+    playedAt: feedback.playedAt,
+    reviewerName,
+    nodeTextMap,
+  };
+}
+
