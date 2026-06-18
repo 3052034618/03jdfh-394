@@ -1,13 +1,48 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '@/store';
-import { Topic, SAMPLE_TOPICS, TopicStats, DialogueTree } from '@/types';
-import { generateId, decodeFeedbackCode } from '@/utils';
-import { Skull, Plus, BookOpen, Trash2, ChevronRight, Flame, GraduationCap, Users, Eye, BarChart2, FileDown, Upload, Check, AlertCircle, Copy } from 'lucide-react';
+import {
+  Topic,
+  SAMPLE_TOPICS,
+  TopicStats,
+  AssignmentBatch,
+  BatchImportResult,
+  NodeFearRanking,
+  DialogueTree,
+  ACT_LABELS,
+} from '@/types';
+import { generateId } from '@/utils';
+import {
+  Skull,
+  Plus,
+  BookOpen,
+  Trash2,
+  ChevronRight,
+  Flame,
+  GraduationCap,
+  Users,
+  Eye,
+  BarChart2,
+  FileDown,
+  Upload,
+  Check,
+  AlertCircle,
+  Copy,
+  TrendingUp,
+  Trophy,
+  Calendar,
+  ClipboardList,
+  FolderKanban,
+  PieChart,
+  AlertTriangle,
+  Play,
+  X,
+} from 'lucide-react';
 
-function formatDate(ts: number): string {
-  return new Date(ts).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+const formatDate = (ts: number | null | undefined): string => {
+  if (!ts) return '未设置';
+  return new Date(ts).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
 
 export default function TopicPage() {
   const navigate = useNavigate();
@@ -15,26 +50,35 @@ export default function TopicPage() {
     topics,
     trees,
     feedbacks,
+    batches,
+    recoveredSnapshots,
     addTopic,
     removeTopic,
     getTreeByTopicId,
     getFeedbacksByTreeId,
-    importFeedback,
-    importTreeSnapshot,
+    batchImportFeedbackCodes,
+    createBatch,
+    removeBatch,
+    findAnyTree,
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'create' | 'classroom'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'classroom' | 'panel'>('create');
 
   const [title, setTitle] = useState('');
   const [scenario, setScenario] = useState('');
   const [constraints, setConstraints] = useState<string[]>([]);
   const [constraintInput, setConstraintInput] = useState('');
 
-  const [feedbackCodeInput, setFeedbackCodeInput] = useState('');
-  const [importError, setImportError] = useState('');
-  const [importSuccess, setImportSuccess] = useState('');
+  const [bulkCodesInput, setBulkCodesInput] = useState('');
+  const [importResult, setImportResult] = useState<BatchImportResult | null>(null);
   const [expandedTopics, setExpandedTopics] = useState<Record<string, boolean>>({});
   const [copiedTopicId, setCopiedTopicId] = useState<string | null>(null);
+
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [batchName, setBatchName] = useState('');
+  const [batchTopicId, setBatchTopicId] = useState('');
+  const [batchDescription, setBatchDescription] = useState('');
+  const [batchDeadline, setBatchDeadline] = useState('');
 
   const addConstraint = () => {
     const trimmed = constraintInput.trim();
@@ -78,45 +122,24 @@ export default function TopicPage() {
     }
   };
 
-  const handleImportFeedback = () => {
-    setImportError('');
-    setImportSuccess('');
+  const handleBulkImport = () => {
+    const result = batchImportFeedbackCodes(bulkCodesInput);
+    setImportResult(result);
+  };
 
-    const code = feedbackCodeInput.trim();
-    if (!code) {
-      setImportError('请输入反馈码');
-      return;
-    }
-
-    const decoded = decodeFeedbackCode(code);
-    if (!decoded) {
-      setImportError('无效的反馈码，请检查是否正确复制了完整的 FB- 开头的内容');
-      return;
-    }
-
-    if (decoded.treeSnapshot) {
-      const existingTree = trees.find((t) => t.id === decoded.treeSnapshot!.id);
-      if (!existingTree) {
-        importTreeSnapshot(decoded.treeSnapshot);
-      }
-    }
-
-    const feedback = {
-      treeId: decoded.treeId,
-      marks: decoded.marks,
-      playedAt: decoded.playedAt,
-      reviewerName: decoded.reviewerName,
-    };
-
-    importFeedback(feedback, decoded.treeSnapshot);
-
-    setImportSuccess(`已导入 ${decoded.marks.length} 个恐惧标记，来自 ${decoded.reviewerName || '匿名'}`);
-    setFeedbackCodeInput('');
+  const handleClearBulk = () => {
+    setBulkCodesInput('');
+    setImportResult(null);
   };
 
   const topicStats = useMemo<TopicStats[]>(() => {
+    const recoveredTreeList = Object.values(recoveredSnapshots);
     return topics.map((topic) => {
-      const topicTrees = trees.filter((t) => t.topicId === topic.id);
+      const directTrees = trees.filter((t) => t.topicId === topic.id);
+      const recoveredTrees = recoveredTreeList.filter(
+        (t) => t.topicId === topic.id && !directTrees.some((d) => d.id === t.id),
+      );
+      const topicTrees = [...directTrees, ...recoveredTrees];
       let totalFeedbacks = 0;
       let totalMarks = 0;
       for (const tree of topicTrees) {
@@ -133,11 +156,14 @@ export default function TopicPage() {
         totalMarks,
       };
     });
-  }, [topics, trees, feedbacks]);
+  }, [topics, trees, feedbacks, recoveredSnapshots]);
 
   const totalTopicsCount = topics.length;
-  const totalTreesCount = trees.length;
+  const totalTreesCount = trees.length + Object.keys(recoveredSnapshots).filter(
+    (id) => !trees.some((t) => t.id === id),
+  ).length;
   const totalMarksCount = feedbacks.reduce((sum, fb) => sum + fb.marks.length, 0);
+  const totalBatchesCount = batches.length;
 
   const toggleTopicExpand = (topicId: string) => {
     setExpandedTopics((prev) => ({ ...prev, [topicId]: !prev[topicId] }));
@@ -172,9 +198,171 @@ export default function TopicPage() {
     return count;
   };
 
+  const handleCreateBatch = () => {
+    if (!batchName.trim() || !batchTopicId) return;
+    const deadline = batchDeadline ? new Date(batchDeadline).getTime() : null;
+    createBatch(batchTopicId, batchName.trim(), batchDescription.trim(), deadline || undefined);
+    setShowBatchModal(false);
+    setBatchName('');
+    setBatchTopicId('');
+    setBatchDescription('');
+    setBatchDeadline('');
+  };
+
+  const handleRemoveBatch = (batchId: string, batchName: string) => {
+    if (window.confirm(`确认删除作业批次「${batchName}」？此操作不可撤销。`)) {
+      removeBatch(batchId);
+    }
+  };
+
+  const getBatchFeedbacksCount = (batch: AssignmentBatch) => {
+    let count = 0;
+    for (const treeId of batch.assignedTreeIds) {
+      count += getFeedbacksByTreeId(treeId).length;
+    }
+    return count;
+  };
+
+  const recoveryRateData = useMemo(() => {
+    const allTreeIds = new Set<string>();
+    for (const t of trees) allTreeIds.add(t.id);
+    for (const id of Object.keys(recoveredSnapshots)) allTreeIds.add(id);
+    for (const fb of feedbacks) allTreeIds.add(fb.treeId);
+
+    const totalAssignable = allTreeIds.size;
+    let totalFeedbackCount = 0;
+    for (const treeId of allTreeIds) {
+      totalFeedbackCount += getFeedbacksByTreeId(treeId).length;
+    }
+    const rate = totalAssignable > 0 ? Math.min(100, Math.round((totalFeedbackCount / totalAssignable) * 100)) : 0;
+
+    let zeroFeedbackWorks = 0;
+    for (const treeId of allTreeIds) {
+      if (getFeedbacksByTreeId(treeId).length === 0) zeroFeedbackWorks++;
+    }
+
+    const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const topicFeedbackCounts: Record<string, number> = {};
+    for (const fb of feedbacks) {
+      if (fb.playedAt >= oneWeekAgo) {
+        const tree = findAnyTree(fb.treeId);
+        if (tree) {
+          topicFeedbackCounts[tree.topicId] = (topicFeedbackCounts[tree.topicId] || 0) + 1;
+        }
+      }
+    }
+    let mostActiveTopicId = '';
+    let maxCount = 0;
+    for (const [tid, cnt] of Object.entries(topicFeedbackCounts)) {
+      if (cnt > maxCount) {
+        maxCount = cnt;
+        mostActiveTopicId = tid;
+      }
+    }
+    const mostActiveTopic = topics.find((t) => t.id === mostActiveTopicId);
+
+    const treeMarkCounts: Record<string, number> = {};
+    for (const fb of feedbacks) {
+      treeMarkCounts[fb.treeId] = (treeMarkCounts[fb.treeId] || 0) + fb.marks.length;
+    }
+    let mostMarkedTreeId = '';
+    let maxMarks = 0;
+    for (const [tid, cnt] of Object.entries(treeMarkCounts)) {
+      if (cnt > maxMarks) {
+        maxMarks = cnt;
+        mostMarkedTreeId = tid;
+      }
+    }
+    const mostMarkedTree = mostMarkedTreeId ? findAnyTree(mostMarkedTreeId) : null;
+
+    return {
+      rate,
+      totalFeedbackCount,
+      zeroFeedbackWorks,
+      mostActiveTopic,
+      mostActiveTopicCount: maxCount,
+      mostMarkedTree,
+      mostMarkedTreeCount: maxMarks,
+    };
+  }, [trees, recoveredSnapshots, feedbacks, topics]);
+
+  const globalFearRankings = useMemo<(NodeFearRanking & { treeId: string; authorName: string })[]>(() => {
+    const nodeMarkMap: Record<string, {
+      count: number;
+      reviewerNames: Set<string>;
+      treeIds: Set<string>;
+    }> = {};
+
+    for (const fb of feedbacks) {
+      for (const mark of fb.marks) {
+        if (!nodeMarkMap[mark.nodeId]) {
+          nodeMarkMap[mark.nodeId] = {
+            count: 0,
+            reviewerNames: new Set(),
+            treeIds: new Set(),
+          };
+        }
+        nodeMarkMap[mark.nodeId].count++;
+        if (fb.reviewerName) {
+          nodeMarkMap[mark.nodeId].reviewerNames.add(fb.reviewerName);
+        }
+        nodeMarkMap[mark.nodeId].treeIds.add(fb.treeId);
+      }
+    }
+
+    const allTrees: DialogueTree[] = [
+      ...trees,
+      ...Object.values(recoveredSnapshots).filter((t) => !trees.some((d) => d.id === t.id)),
+    ];
+
+    const rankings: (NodeFearRanking & { treeId: string; authorName: string })[] = [];
+
+    for (const [nodeId, data] of Object.entries(nodeMarkMap)) {
+      let nodeText = '';
+      let actType: NodeFearRanking['actType'] = 'opening';
+      let treeId = '';
+      let authorName = '';
+
+      for (const tid of data.treeIds) {
+        const tree = findAnyTree(tid);
+        if (tree) {
+          treeId = tree.id;
+          authorName = tree.authorName || '匿名作者';
+          for (const act of tree.acts) {
+            const node = act.nodes.find((n) => n.id === nodeId);
+            if (node) {
+              nodeText = node.content;
+              actType = act.type;
+              break;
+            }
+          }
+          if (nodeText) break;
+        }
+      }
+
+      if (!nodeText) {
+        nodeText = '(对白内容已丢失)';
+      }
+
+      rankings.push({
+        nodeId,
+        nodeText,
+        actType,
+        markCount: data.count,
+        reviewerNames: Array.from(data.reviewerNames),
+        treeId,
+        authorName,
+      });
+    }
+
+    return rankings.sort((a, b) => b.markCount - a.markCount).slice(0, 10);
+  }, [feedbacks, trees, recoveredSnapshots]);
+
+  const topMarkCount = globalFearRankings.length > 0 ? globalFearRankings[0].markCount : 1;
+
   return (
     <div className="min-h-screen bg-horror-bg animate-fade-in">
-      <div className="mx-auto max-w-4xl px-4 py-8">
+      <div className="mx-auto max-w-6xl px-4 py-8">
         <div className="mb-10 text-center">
           <Skull className="mx-auto mb-4 h-12 w-12 text-horror-rust animate-glow" />
           <h1 className="font-creep text-5xl text-horror-rust mb-2">暗语</h1>
@@ -184,32 +372,36 @@ export default function TopicPage() {
           </p>
         </div>
 
-        <div className="mb-8 flex justify-center border-b border-horror-border/50">
+        <div className="mb-8 flex justify-center gap-2">
           <button
-            className={`relative px-6 py-3 text-sm font-medium transition-colors ${
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
               activeTab === 'create'
-                ? 'text-horror-rust'
-                : 'text-horror-muted hover:text-horror-text'
+                ? 'bg-horror-rust/15 text-horror-rust'
+                : 'text-horror-muted hover:text-horror-rust'
             }`}
             onClick={() => setActiveTab('create')}
           >
             📝 创建设置
-            {activeTab === 'create' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-horror-rust" />
-            )}
           </button>
           <button
-            className={`relative px-6 py-3 text-sm font-medium transition-colors ${
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
               activeTab === 'classroom'
-                ? 'text-horror-rust'
-                : 'text-horror-muted hover:text-horror-text'
+                ? 'bg-horror-rust/15 text-horror-rust'
+                : 'text-horror-muted hover:text-horror-rust'
             }`}
             onClick={() => setActiveTab('classroom')}
           >
             🎓 课堂作业包
-            {activeTab === 'classroom' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-horror-rust" />
-            )}
+          </button>
+          <button
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+              activeTab === 'panel'
+                ? 'bg-horror-rust/15 text-horror-rust'
+                : 'text-horror-muted hover:text-horror-rust'
+            }`}
+            onClick={() => setActiveTab('panel')}
+          >
+            📊 班级回收面板
           </button>
         </div>
 
@@ -376,39 +568,100 @@ export default function TopicPage() {
             <div className="horror-card">
               <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
                 <Upload className="h-5 w-5 text-horror-rust" />
-                导入反馈码
+                批量导入反馈码
               </h2>
+              <p className="mb-3 text-sm text-horror-muted">
+                一行一个 FB- 开头的反馈码，支持粘贴多条
+              </p>
               <div className="space-y-3">
                 <textarea
-                  className={`horror-input resize-none ${
-                    importError ? 'border-horror-danger focus:border-horror-danger' : ''
-                  }`}
-                  rows={3}
-                  placeholder="粘贴同学发来的 FB- 开头的反馈码..."
-                  value={feedbackCodeInput}
+                  className="horror-input resize-vertical"
+                  rows={6}
+                  placeholder="FB-xxxxxxxxxxx\nFB-yyyyyyyyyyyy\nFB-zzzzzzzzzzzz..."
+                  value={bulkCodesInput}
                   onChange={(e) => {
-                    setFeedbackCodeInput(e.target.value);
-                    setImportError('');
-                    setImportSuccess('');
+                    setBulkCodesInput(e.target.value);
                   }}
                 />
-                <button
-                  className="horror-btn-primary w-full flex items-center justify-center gap-2"
-                  onClick={handleImportFeedback}
-                >
-                  <FileDown className="h-4 w-4" />
-                  导入反馈
-                </button>
-                {importError && (
-                  <div className="flex items-start gap-2 rounded-lg bg-horror-danger/10 p-3 text-sm text-horror-danger">
-                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>{importError}</span>
-                  </div>
-                )}
-                {importSuccess && (
-                  <div className="flex items-start gap-2 rounded-lg bg-horror-rust/10 p-3 text-sm text-horror-rust">
-                    <Check className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>{importSuccess}</span>
+                <div className="flex gap-3">
+                  <button
+                    className="horror-btn-primary flex-1 flex items-center justify-center gap-2"
+                    onClick={handleBulkImport}
+                    disabled={!bulkCodesInput.trim()}
+                  >
+                    <Upload className="h-4 w-4" />
+                    批量导入
+                  </button>
+                  <button
+                    className="horror-btn-ghost"
+                    onClick={handleClearBulk}
+                  >
+                    清空
+                  </button>
+                </div>
+                {importResult && (
+                  <div
+                    className={`rounded-lg p-4 space-y-2 border-l-4 ${
+                      importResult.added > 0
+                        ? 'bg-green-900/10 border-green-600'
+                        : importResult.skipped > 0
+                        ? 'bg-yellow-900/10 border-yellow-600'
+                        : importResult.failed > 0
+                        ? 'bg-red-900/10 border-red-600'
+                        : 'bg-blue-900/10 border-blue-600'
+                    }`}
+                  >
+                    {importResult.added > 0 && (
+                      <div className="flex items-start gap-2 text-sm text-green-400">
+                        <Check className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>✅ 新增反馈: {importResult.added} 份</span>
+                      </div>
+                    )}
+                    {importResult.skipped > 0 && (
+                      <div className="flex items-start gap-2 text-sm text-yellow-400">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>⚠️ 跳过重复: {importResult.skipped} 份</span>
+                      </div>
+                    )}
+                    {importResult.failed > 0 && (
+                      <div className="flex items-start gap-2 text-sm text-red-400">
+                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>❌ 无效码: {importResult.failed} 份</span>
+                      </div>
+                    )}
+                    {importResult.recoveredTrees > 0 && (
+                      <div className="flex items-start gap-2 text-sm text-blue-400">
+                        <FileDown className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>💾 自动恢复作品快照: {importResult.recoveredTrees} 份</span>
+                      </div>
+                    )}
+                    {importResult.details.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-horror-border/50 space-y-1 max-h-48 overflow-y-auto">
+                        {importResult.details.slice(0, 10).map((d, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs">
+                            <span
+                              className={`inline-flex items-center px-2 py-0.5 rounded-full ${
+                                d.status === 'added'
+                                  ? 'bg-green-900/30 text-green-400'
+                                  : d.status === 'skipped'
+                                  ? 'bg-yellow-900/30 text-yellow-400'
+                                  : 'bg-red-900/30 text-red-400'
+                              }`}
+                            >
+                              {d.status === 'added' ? '新增' : d.status === 'skipped' ? '跳过' : '无效'}
+                            </span>
+                            <span className="text-horror-muted truncate flex-1">
+                              {d.message || d.code.slice(0, 30) + '...'}
+                            </span>
+                          </div>
+                        ))}
+                        {importResult.details.length > 10 && (
+                          <div className="text-xs text-horror-muted/70">
+                            ... 还有 {importResult.details.length - 10} 条
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="pt-2 text-xs text-horror-muted/70">
@@ -511,29 +764,30 @@ export default function TopicPage() {
                               ) : (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                   {stats.trees.map((tree) => {
-                                    const treeFeedbacks = getFeedbacksByTreeId(tree.id);
+                                    const resolvedTree = findAnyTree(tree.id) || tree;
+                                    const treeFeedbacks = getFeedbacksByTreeId(resolvedTree.id);
                                     const treeMarks = treeFeedbacks.reduce(
                                       (sum, fb) => sum + fb.marks.length,
                                       0,
                                     );
-                                    const topNodes = getTopFearNodes(tree.id);
+                                    const topNodes = getTopFearNodes(resolvedTree.id);
                                     return (
                                       <div
-                                        key={tree.id}
+                                        key={resolvedTree.id}
                                         className="rounded-lg border border-horror-border/50 p-3 bg-horror-card-hover/30"
                                       >
                                         <div className="flex items-start justify-between mb-2">
                                           <div className="min-w-0">
                                             <div className="text-sm font-medium text-horror-text truncate">
-                                              {tree.authorName || '匿名作者'}
+                                              {resolvedTree.authorName || '匿名作者'}
                                             </div>
                                             <div className="text-xs text-horror-muted">
-                                              {formatDate(tree.createdAt)}
+                                              {formatDate(resolvedTree.createdAt)}
                                             </div>
                                           </div>
                                         </div>
                                         <div className="flex items-center gap-3 mb-3 text-xs text-horror-muted">
-                                          <span>{countDialogueNodes(tree)} 条对白</span>
+                                          <span>{countDialogueNodes(resolvedTree)} 条对白</span>
                                           <span>{treeFeedbacks.length} 份反馈</span>
                                           <span className="text-horror-rust">{treeMarks} 恐惧点</span>
                                         </div>
@@ -562,28 +816,28 @@ export default function TopicPage() {
 
                                         <div className="flex items-center gap-1.5">
                                           <button
-                                            className="horror-btn-ghost text-[11px] px-2 py-1 flex-1 flex items-center justify-center gap-1"
-                                            onClick={() => navigate(`/editor/${tree.id}`)}
-                                            title="查看/编辑作品"
+                                            className="horror-btn-primary text-[11px] px-2 py-1 flex-1 flex items-center justify-center gap-1"
+                                            onClick={() => navigate(`/stats/${resolvedTree.id}`)}
+                                            title="查看统计"
                                           >
-                                            <Eye className="h-3 w-3" />
-                                            查看
+                                            <BarChart2 className="h-3 w-3" />
+                                            📊 统计
                                           </button>
                                           <button
                                             className="horror-btn-ghost text-[11px] px-2 py-1 flex-1 flex items-center justify-center gap-1"
-                                            onClick={() => navigate(`/play/${tree.id}`)}
+                                            onClick={() => navigate(`/play/${resolvedTree.id}`)}
                                             title="回放"
                                           >
-                                            <ChevronRight className="h-3 w-3" />
+                                            <Play className="h-3 w-3" />
                                             回放
                                           </button>
                                           <button
                                             className="horror-btn-ghost text-[11px] px-2 py-1 flex-1 flex items-center justify-center gap-1"
-                                            onClick={() => navigate(`/play/${tree.id}?stats=1`)}
-                                            title="统计"
+                                            onClick={() => navigate(`/editor/${resolvedTree.id}`)}
+                                            title="查看/编辑作品"
                                           >
-                                            <BarChart2 className="h-3 w-3" />
-                                            统计
+                                            <Eye className="h-3 w-3" />
+                                            查看
                                           </button>
                                         </div>
                                       </div>
@@ -606,7 +860,7 @@ export default function TopicPage() {
                 <GraduationCap className="h-5 w-5 text-horror-rust" />
                 全局统计
               </h2>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="horror-card text-center">
                   <GraduationCap className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
                   <div className="text-2xl font-bold text-horror-text mb-1">{totalTopicsCount}</div>
@@ -622,7 +876,296 @@ export default function TopicPage() {
                   <div className="text-2xl font-bold text-horror-text mb-1">{totalMarksCount}</div>
                   <div className="text-xs text-horror-muted">恐惧标记总数</div>
                 </div>
+                <div className="horror-card text-center">
+                  <ClipboardList className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
+                  <div className="text-2xl font-bold text-horror-text mb-1">{totalBatchesCount}</div>
+                  <div className="text-xs text-horror-muted">作业批次数</div>
+                </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'panel' && (
+          <div className="space-y-8">
+            <div>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="flex items-center gap-2 text-lg font-medium text-horror-text">
+                  <FolderKanban className="h-5 w-5 text-horror-rust" />
+                  作业批次管理
+                </h2>
+                <button
+                  className="horror-btn-primary text-sm flex items-center gap-1.5"
+                  onClick={() => setShowBatchModal(true)}
+                >
+                  <Plus className="h-4 w-4" />
+                  新建作业批次
+                </button>
+              </div>
+
+              {showBatchModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                  <div className="horror-card w-full max-w-md">
+                    <div className="mb-4 flex items-center justify-between">
+                      <h3 className="text-lg font-medium text-horror-text">新建作业批次</h3>
+                      <button
+                        className="text-horror-muted hover:text-horror-text p-1"
+                        onClick={() => setShowBatchModal(false)}
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="mb-1.5 block text-sm text-horror-muted">批次名称</label>
+                        <input
+                          type="text"
+                          className="horror-input"
+                          placeholder="如：第3周作业·深夜来电"
+                          value={batchName}
+                          onChange={(e) => setBatchName(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-sm text-horror-muted">关联题目</label>
+                        <select
+                          className="horror-input"
+                          value={batchTopicId}
+                          onChange={(e) => setBatchTopicId(e.target.value)}
+                        >
+                          <option value="">-- 请选择题目 --</option>
+                          {topics.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-sm text-horror-muted">描述</label>
+                        <textarea
+                          className="horror-input resize-none"
+                          rows={3}
+                          placeholder="作业要求、备注信息..."
+                          value={batchDescription}
+                          onChange={(e) => setBatchDescription(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-sm text-horror-muted">截止日期</label>
+                        <input
+                          type="datetime-local"
+                          className="horror-input"
+                          value={batchDeadline}
+                          onChange={(e) => setBatchDeadline(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        className="horror-btn-primary w-full"
+                        onClick={handleCreateBatch}
+                        disabled={!batchName.trim() || !batchTopicId}
+                      >
+                        创建批次
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {batches.length === 0 ? (
+                <div className="horror-card text-center py-8 text-horror-muted">
+                  暂无作业批次，点击「新建作业批次」开始创建
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {batches.map((batch) => {
+                    const topic = topics.find((t) => t.id === batch.topicId);
+                    const assignedCount = batch.assignedTreeIds.length;
+                    const feedbacksCount = getBatchFeedbacksCount(batch);
+                    const progressPct = assignedCount > 0 ? Math.min(100, Math.round((feedbacksCount / assignedCount) * 100)) : 0;
+                    const firstTreeId = batch.assignedTreeIds[0];
+                    return (
+                      <div key={batch.id} className="horror-card">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <FolderKanban className="h-5 w-5 text-horror-rust shrink-0" />
+                              <h3 className="font-medium text-horror-text truncate">{batch.name}</h3>
+                            </div>
+                            <div className="text-xs text-horror-muted space-y-0.5">
+                              <div>所属题目: {topic?.title || '题目已删除'}</div>
+                              <div>截止日期: {formatDate(batch.deadline)}</div>
+                            </div>
+                          </div>
+                          <button
+                            className="horror-btn-ghost text-xs text-horror-danger hover:text-horror-danger p-2"
+                            onClick={() => handleRemoveBatch(batch.id, batch.name)}
+                            title="删除批次"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                        {batch.description && (
+                          <div className="mb-3 text-xs text-horror-muted/90 bg-horror-card-hover/30 rounded p-2">
+                            {batch.description}
+                          </div>
+                        )}
+                        <div className="mb-3">
+                          <div className="flex justify-between text-xs text-horror-muted mb-1">
+                            <span>回收进度</span>
+                            <span>{feedbacksCount} / {assignedCount}</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-horror-card-hover overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-horror-rust/80 transition-all"
+                              style={{ width: `${progressPct}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-horror-card-hover px-2.5 py-1 text-xs text-horror-muted">
+                              <Users className="h-3.5 w-3.5" />
+                              {assignedCount} 份作品
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded-full bg-horror-card-hover px-2.5 py-1 text-xs text-horror-muted">
+                              <BarChart2 className="h-3.5 w-3.5" />
+                              {feedbacksCount} 份已回收反馈
+                            </span>
+                          </div>
+                          {firstTreeId && (
+                            <button
+                              className="horror-btn-ghost text-xs flex items-center gap-1"
+                              onClick={() => navigate(`/stats/${firstTreeId}`)}
+                            >
+                              <BarChart2 className="h-3.5 w-3.5" />
+                              查看统计汇总
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
+                <PieChart className="h-5 w-5 text-horror-rust" />
+                回收进度总览
+              </h2>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="horror-card text-center">
+                  <PieChart className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
+                  <div className="text-2xl font-bold text-horror-text mb-1">{recoveryRateData.rate}%</div>
+                  <div className="text-xs text-horror-muted">总反馈回收率</div>
+                </div>
+                <div className="horror-card text-center">
+                  <TrendingUp className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
+                  <div className="text-2xl font-bold text-horror-text mb-1">{recoveryRateData.zeroFeedbackWorks}</div>
+                  <div className="text-xs text-horror-muted">未回收作品数</div>
+                </div>
+                <div className="horror-card text-center">
+                  <Calendar className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
+                  <div className="text-lg font-bold text-horror-text mb-1 truncate px-1" title={recoveryRateData.mostActiveTopic?.title}>
+                    {recoveryRateData.mostActiveTopic?.title?.slice(0, 8) || '暂无'}
+                  </div>
+                  <div className="text-xs text-horror-muted">
+                    最活跃题目 {recoveryRateData.mostActiveTopic ? `(${recoveryRateData.mostActiveTopicCount}份)` : ''}
+                  </div>
+                </div>
+                <div className="horror-card text-center">
+                  <Trophy className="mx-auto mb-2 h-8 w-8 text-horror-rust" />
+                  <div className="text-lg font-bold text-horror-text mb-1 truncate px-1" title={recoveryRateData.mostMarkedTree?.authorName || ''}>
+                    {recoveryRateData.mostMarkedTree ? recoveryRateData.mostMarkedTree.authorName?.slice(0, 8) || '匿名' : '暂无'}
+                  </div>
+                  <div className="text-xs text-horror-muted">
+                    标记最多作品 {recoveryRateData.mostMarkedTree ? `(${recoveryRateData.mostMarkedTreeCount}点)` : ''}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h2 className="mb-4 flex items-center gap-2 text-lg font-medium text-horror-text">
+                <Trophy className="h-5 w-5 text-horror-rust" />
+                全题库高恐惧对白 Top 10
+              </h2>
+              {globalFearRankings.length === 0 ? (
+                <div className="horror-card text-center py-8 text-horror-muted">
+                  暂无恐惧标记数据，需要先导入反馈
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {globalFearRankings.map((item, index) => {
+                    const heatPct = topMarkCount > 0 ? (item.markCount / topMarkCount) * 100 : 0;
+                    const medalIcon = index === 0 ? '🏆' : index === 1 ? '🥈' : index === 2 ? '🥉' : null;
+                    return (
+                      <div key={item.nodeId} className="horror-card">
+                        <div className="flex items-start gap-3">
+                          <div className="shrink-0 w-10 text-center pt-1">
+                            {medalIcon ? (
+                              <span className="text-2xl">{medalIcon}</span>
+                            ) : (
+                              <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-horror-card-hover text-horror-muted text-xs font-bold">
+                                #{index + 1}
+                              </span>
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-horror-rust/15 text-horror-rust text-[11px] font-medium">
+                                {ACT_LABELS[item.actType]}
+                              </span>
+                              {item.authorName && (
+                                <span className="text-[11px] text-horror-muted/70">
+                                  作者: {item.authorName}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-sm text-horror-text/90 mb-3 max-h-24 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                              {item.nodeText}
+                            </div>
+                            <div className="mb-3 flex items-center gap-2">
+                              <div className="h-2 flex-1 rounded-full bg-horror-card-hover overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-gradient-to-r from-horror-rust/60 to-horror-rust transition-all"
+                                  style={{ width: `${heatPct}%` }}
+                                />
+                              </div>
+                              <span className="text-[10px] text-horror-muted w-10 text-right">
+                                {Math.round(heatPct)}%
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                              <div className="flex items-center gap-3 text-xs text-horror-muted">
+                                <span className="inline-flex items-center gap-1 text-horror-rust">
+                                  <Flame className="h-3.5 w-3.5" />
+                                  {item.markCount}
+                                </span>
+                                <span className="inline-flex items-center gap-1">
+                                  <Users className="h-3.5 w-3.5" />
+                                  {item.reviewerNames.length > 0 ? `${item.reviewerNames.length} 人标记` : '匿名标记'}
+                                </span>
+                              </div>
+                              {item.treeId && (
+                                <button
+                                  className="horror-btn-ghost text-[11px] flex items-center gap-1"
+                                  onClick={() => navigate(`/stats/${item.treeId}`)}
+                                >
+                                  <BarChart2 className="h-3 w-3" />
+                                  查看作品统计
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}

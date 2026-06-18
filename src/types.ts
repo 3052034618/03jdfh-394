@@ -80,6 +80,61 @@ export interface TopicStats {
   totalMarks: number;
 }
 
+export interface AssignmentBatch {
+  id: string;
+  topicId: string;
+  name: string;
+  deadline: number | null;
+  description: string;
+  createdAt: number;
+  assignedTreeIds: string[];
+}
+
+export interface BatchImportResult {
+  added: number;
+  skipped: number;
+  failed: number;
+  recoveredTrees: number;
+  details: Array<{ code: string; status: 'added' | 'skipped' | 'failed'; message?: string }>;
+}
+
+export interface NodeFearRanking {
+  nodeId: string;
+  nodeText: string;
+  actType: ActType;
+  markCount: number;
+  reviewerNames: string[];
+}
+
+export interface TreeFeedbackAggregate {
+  treeId: string;
+  tree: DialogueTree | null;
+  authorName: string;
+  feedbackCount: number;
+  totalMarks: number;
+  reviewerNames: string[];
+  topNodes: NodeFearRanking[];
+}
+
+export interface StatsNodeRow {
+  globalIndex: number;
+  nodeId: string;
+  actType: ActType;
+  speaker: 'npc' | 'narrator';
+  content: string;
+  markCount: number;
+  reviewers: Array<{ name: string; timestamp: number }>;
+}
+
+export interface ReviewerRow {
+  name: string;
+  playedAt: number;
+  marksCount: number;
+  markedNodeIds: string[];
+}
+
+export type StatsTab = 'heatmap' | 'reviewers' | 'ranking';
+
 export const ACT_LABELS: Record<ActType, string> = {
   opening: '开场寒暄',
   anomaly: '异常暗示',
