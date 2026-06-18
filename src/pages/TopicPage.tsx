@@ -3,7 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '@/store';
 import {
   Topic, SAMPLE_TOPICS, TopicStats, AssignmentBatch,
-  BatchImportResult, NodeFearRanking, DialogueTree, ACT_LABELS
+  BatchImportResult, NodeFearRanking, DialogueTree, ACT_LABELS,
+  ActType, PlaybackFeedback
 } from '@/types';
 import { generateId, decodeFeedbackCode } from '@/utils';
 import {
@@ -41,6 +42,9 @@ export default function TopicPage() {
   const [importResult, setImportResult] = useState<BatchImportResult | null>(null);
   const [importDetailTab, setImportDetailTab] = useState<'all' | 'added' | 'skipped' | 'unparsed'>('all');
   const [showUnparsed, setShowUnparsed] = useState(false);
+  const [showExportModal, setShowExportModal] = useState<AssignmentBatch | null>(null);
+  const [exportCopied, setExportCopied] = useState(false);
+  const [groupedImportAccordionState, setGroupedImportAccordionState] = useState<Record<string, boolean>>({});
 
   const [title, setTitle] = useState('');
   const [scenario, setScenario] = useState('');
@@ -119,6 +123,18 @@ export default function TopicPage() {
   const handleBulkImport = () => {
     const result = batchImportFeedbackCodes(bulkCodesInput);
     setImportResult(result);
+
+    if (result.affectedTopicIds.length > 0) {
+      const newAccordionState: Record<string, boolean> = {};
+      const newGroupedAccordionState: Record<string, boolean> = {};
+      for (const tid of result.affectedTopicIds) {
+        newAccordionState[tid] = true;
+        newGroupedAccordionState[tid] = true;
+      }
+      setAccordionState((prev) => ({ ...prev, ...newAccordionState }));
+      setGroupedImportAccordionState((prev) => ({ ...prev, ...newGroupedAccordionState }));
+      setScrollToTopicId(result.affectedTopicIds[0]);
+    }
   };
 
   const handleClearBulk = () => {
@@ -478,6 +494,103 @@ export default function TopicPage() {
     setBatchDetailTab((prev) => ({ ...prev, [batchId]: tab }));
   };
 
+  function generateBatchMarkdown(
+    batch: AssignmentBatch,
+    topic: Topic | undefined,
+    trees: DialogueTree[],
+    feedbacks: PlaybackFeedback[]
+  ): string {
+    const totalWorks = trees.length;
+    let withFeedback = 0;
+    let withoutFeedback = 0;
+    let totalMarks = 0;
+    const treesWithFeedback: DialogueTree[] = [];
+    const treesWithoutFeedback: DialogueTree[] = [];
+
+    for (const tree of trees) {
+      const treeFeedbacks = feedbacks.filter((fb) => fb.treeId === tree.id);
+      const treeMarks = treeFeedbacks.reduce((s, fb) => s + fb.marks.length, 0);
+      totalMarks += treeMarks;
+      if (treeFeedbacks.length > 0) {
+        withFeedback++;
+        treesWithFeedback.push(tree);
+      } else {
+        withoutFeedback++;
+        treesWithoutFeedback.push(tree);
+      }
+    }
+
+    const pct = totalWorks > 0 ? Math.round((withFeedback / totalWorks) * 100) : 0;
+
+    let md = `# ${batch.name}\n`;
+    md += `**题目**: ${topic?.title || '未知题目'}\n`;
+    md += `**截止日期**: ${formatDate(batch.deadline)}\n`;
+    md += `**导出时间**: ${formatDate(Date.now())}\n\n`;
+
+    md += `## 📊 回收进度\n`;
+    md += `- **总作品数**: ${totalWorks}\n`;
+    md += `- **已交反馈**: ${withFeedback} (${pct}%)\n`;
+    md += `- **未交反馈**: ${withoutFeedback}\n`;
+    md += `- **总恐惧标记**: ${totalMarks}\n\n`;
+
+    md += `## 🟢 已交反馈作品\n`;
+    for (const tree of treesWithFeedback) {
+      const treeFeedbacks = feedbacks.filter((fb) => fb.treeId === tree.id);
+      const feedbackCount = treeFeedbacks.length;
+      const nodeCount = countDialogueNodes(tree);
+      const treeMarks = treeFeedbacks.reduce((s, fb) => s + fb.marks.length, 0);
+      const latestFeedback = treeFeedbacks.reduce((latest, fb) =>
+        !latest || fb.playedAt > latest.playedAt ? fb : latest,
+        null as PlaybackFeedback | null
+      );
+
+      md += `### ${tree.authorName || '匿名'}\n`;
+      md += `- **对白数**: ${nodeCount}\n`;
+      md += `- **反馈数**: ${feedbackCount}\n`;
+      if (latestFeedback) {
+        md += `- **最近反馈**: ${latestFeedback.reviewerName || '匿名'} · ${formatDate(latestFeedback.playedAt)}\n`;
+      }
+      md += `- **恐惧点数**: ${treeMarks}\n`;
+
+      const topNodes = getTopFearNodes(tree.id);
+      if (topNodes.length > 0) {
+        md += `- **高恐惧对白**:\n`;
+        for (let i = 0; i < topNodes.length; i++) {
+          const [nodeId, count] = topNodes[i];
+          let nodeContent = '';
+          let actType: ActType = 'opening';
+          for (const act of tree.acts) {
+            const node = act.nodes.find((n) => n.id === nodeId);
+            if (node) {
+              nodeContent = node.content;
+              actType = act.type;
+              break;
+            }
+          }
+          const actLabel = ACT_LABELS[actType];
+          md += `  - \`#${i + 1}\` [${actLabel}] ${nodeContent.slice(0, 30)}... — ${count}次标记\n`;
+        }
+      }
+      md += '\n';
+    }
+
+    md += `## ⚪ 未交反馈作品\n`;
+    for (const tree of treesWithoutFeedback) {
+      md += `- ${tree.authorName || '匿名'} — 创建于 ${formatDate(tree.createdAt)}\n`;
+      md += `- 分享链接: \`/play/${tree.id}\`\n\n`;
+    }
+
+    const allTopNodes = getBatchTopFearNodes(batch);
+    md += `## 🏆 本批次高恐惧对白 Top 5\n`;
+    for (let i = 0; i < allTopNodes.length; i++) {
+      const item = allTopNodes[i];
+      md += `${i + 1}. \`#${i + 1}\` [${ACT_LABELS[item.actType]}] ${item.nodeText.slice(0, 40)}...\n`;
+      md += `   - 作者: ${item.authorName} · ${item.markCount}次标记 · ${item.reviewerNames.length}位同学\n`;
+    }
+
+    return md;
+  }
+
   return (
     <div className="min-h-screen bg-horror-bg animate-fade-in">
       <div className="mx-auto max-w-6xl px-4 py-8">
@@ -764,6 +877,146 @@ export default function TopicPage() {
                       <div className="flex items-center gap-2 rounded-lg border-l-4 border-blue-600 bg-blue-900/10 px-4 py-2 text-sm text-blue-400">
                         <FileDown className="h-4 w-4 shrink-0" />
                         <span>🔵 自动恢复作品 {importResult.recoveredTrees} 份</span>
+                      </div>
+                    )}
+                    {importResult.affectedTopicIds.length > 0 && (
+                      <div className="flex items-center gap-2 rounded-lg border-l-4 border-purple-600 bg-purple-900/10 px-4 py-2 text-sm text-purple-400">
+                        <BookOpen className="h-4 w-4 shrink-0" />
+                        <span>📚 涉及 {importResult.affectedTopicIds.length} 个题目</span>
+                      </div>
+                    )}
+
+                    {importResult.affectedTopicIds.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        {(() => {
+                          const groupedByTopic: Record<string, typeof importResult.details> = {};
+                          for (const d of importResult.details) {
+                            if (d.topicId) {
+                              if (!groupedByTopic[d.topicId]) {
+                                groupedByTopic[d.topicId] = [];
+                              }
+                              groupedByTopic[d.topicId].push(d);
+                            }
+                          }
+
+                          const toggleGroupExpand = (topicId: string) => {
+                            setGroupedImportAccordionState((prev) => ({
+                              ...prev,
+                              [topicId]: !prev[topicId],
+                            }));
+                          };
+
+                          return Object.entries(groupedByTopic).map(([topicId, details]) => {
+                            const topic = topics.find((t) => t.id === topicId);
+                            if (!topic) return null;
+                            const isExpanded = groupedImportAccordionState[topicId] ?? true;
+                            const countAdded = details.filter((d) => d.status === 'added').length;
+                            const countSkipped = details.filter((d) => d.status === 'skipped').length;
+                            const countFailed = details.filter((d) => d.status === 'failed').length;
+                            const addedDetails = details.filter((d) => d.status === 'added');
+                            const skippedDetails = details.filter((d) => d.status === 'skipped');
+
+                            const getFeedbackOrdinal = (reviewerName: string | undefined, treeId: string | undefined) => {
+                              if (!treeId) return '首份反馈';
+                              const treeFeedbacks = feedbacks.filter((fb) => fb.treeId === treeId);
+                              const reviewerFeedbacks = treeFeedbacks.filter(
+                                (fb) => fb.reviewerName === reviewerName
+                              );
+                              if (reviewerFeedbacks.length <= 1) {
+                                const reviewerCount = new Set(
+                                  treeFeedbacks.map((fb) => fb.reviewerName || '匿名')
+                                ).size;
+                                if (reviewerCount === 1) return '首份反馈';
+                                return `第 ${reviewerCount} 份反馈`;
+                              }
+                              return `第 ${reviewerFeedbacks.length} 份反馈`;
+                            };
+
+                            return (
+                              <div key={topicId} className="rounded-lg border border-horror-border/50 overflow-hidden">
+                                <button
+                                  className="w-full flex items-center justify-between gap-3 p-3 text-left hover:bg-horror-card-hover transition-colors"
+                                  onClick={() => toggleGroupExpand(topicId)}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <ChevronDown
+                                      className={`h-4 w-4 text-horror-muted transition-transform shrink-0 ${
+                                        isExpanded ? 'rotate-180' : ''
+                                      }`}
+                                    />
+                                    <BookOpen className="h-4 w-4 text-horror-rust shrink-0" />
+                                    <span className="font-medium text-horror-text truncate">{topic.title}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0 text-xs">
+                                    <span className="text-green-400">新增 {countAdded}</span>
+                                    <span className="text-horror-muted">/</span>
+                                    <span className="text-yellow-400">重复 {countSkipped}</span>
+                                    <span className="text-horror-muted">/</span>
+                                    <span className="text-red-400">无效 {countFailed}</span>
+                                  </div>
+                                </button>
+
+                                {isExpanded && (
+                                  <div className="border-t border-horror-border/50 p-3 space-y-3">
+                                    {addedDetails.length > 0 && (
+                                      <div>
+                                        <div className="mb-2 text-xs font-medium text-green-400 flex items-center gap-1">
+                                          <Check className="h-3 w-3" />
+                                          新增反馈
+                                        </div>
+                                        <div className="rounded-lg border border-green-900/30 bg-green-900/5 p-2 space-y-1">
+                                          {addedDetails.map((d, i) => (
+                                            <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                                              <span className="text-horror-text">
+                                                <span className="font-medium">{d.reviewerName || '匿名'}</span>
+                                                {': '}
+                                                {getFeedbackOrdinal(d.reviewerName, d.treeId)}
+                                              </span>
+                                              {d.treeId && (
+                                                <button
+                                                  className="text-horror-rust hover:text-horror-rust-light shrink-0"
+                                                  onClick={() => navigate(`/stats/${d.treeId}`)}
+                                                >
+                                                  去查看 →
+                                                </button>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {skippedDetails.length > 0 && (
+                                      <div>
+                                        <div className="mb-2 text-xs font-medium text-yellow-400 flex items-center gap-1">
+                                          <AlertTriangle className="h-3 w-3" />
+                                          重复跳过
+                                        </div>
+                                        <div className="rounded-lg border border-yellow-900/30 bg-yellow-900/5 p-2 space-y-1">
+                                          {skippedDetails.map((d, i) => (
+                                            <div key={i} className="text-xs text-horror-muted">
+                                              <span className="font-medium text-yellow-400/80">
+                                                {d.reviewerName || '匿名'}
+                                              </span>
+                                              {': 重复反馈已跳过'}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <button
+                                      className="horror-btn-primary w-full flex items-center justify-center gap-2 text-sm"
+                                      onClick={() => handleJumpToTopic(topicId)}
+                                    >
+                                      进入 {topic.title} 汇总 →
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          });
+                        })()}
                       </div>
                     )}
 
@@ -1246,6 +1499,17 @@ export default function TopicPage() {
                             </div>
                             <div className="flex items-center gap-2">
                               <button
+                                className="horror-btn-ghost text-xs p-2"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShowExportModal(batch);
+                                  setExportCopied(false);
+                                }}
+                                title="导出汇总"
+                              >
+                                📋 导出汇总
+                              </button>
+                              <button
                                 className="horror-btn-ghost text-xs text-horror-danger hover:text-horror-danger p-2"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1619,6 +1883,80 @@ export default function TopicPage() {
             </div>
           </div>
         )}
+        {showExportModal && (() => {
+          const topic = topics.find((t) => t.id === showExportModal.topicId);
+          const batchTrees = getBatchTrees(showExportModal);
+          const batchFeedbacks = feedbacks.filter((fb) => batchTrees.some((t) => t.id === fb.treeId));
+          const markdown = generateBatchMarkdown(showExportModal, topic, batchTrees, batchFeedbacks);
+
+          const handleCopy = () => {
+            navigator.clipboard?.writeText(markdown).then(() => {
+              setExportCopied(true);
+              setTimeout(() => setExportCopied(false), 2000);
+            });
+          };
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+              <div className="horror-card w-full max-w-2xl max-h-[90vh] flex flex-col">
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-lg font-medium text-horror-text">
+                    {showExportModal.name} - 课堂汇总
+                  </h3>
+                  <button
+                    className="text-horror-muted hover:text-horror-text p-1"
+                    onClick={() => setShowExportModal(null)}
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+                <textarea
+                  className="horror-input resize-vertical flex-1 min-h-[300px] font-mono text-xs"
+                  value={markdown}
+                  readOnly
+                  ref={(el) => {
+                    if (el) {
+                      el.select();
+                    }
+                  }}
+                />
+                <div className="mt-4 flex gap-3">
+                  <button
+                    className="horror-btn-primary flex-1 flex items-center justify-center gap-2"
+                    onClick={handleCopy}
+                  >
+                    {exportCopied ? (
+                      <>
+                        <Check className="h-4 w-4" />
+                        已复制
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-4 w-4" />
+                        📋 一键复制 Markdown
+                      </>
+                    )}
+                  </button>
+                  <button
+                    className="horror-btn-ghost"
+                    onClick={() => setShowExportModal(null)}
+                  >
+                    关闭
+                  </button>
+                  <button
+                    className="horror-btn-primary flex items-center justify-center gap-2"
+                    onClick={() => {
+                      setShowExportModal(null);
+                      navigate(`/review/${showExportModal.topicId}`);
+                    }}
+                  >
+                    跳转到课程复盘 →
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

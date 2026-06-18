@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '@/store';
 import type { DialogueTree, DialogueNode, PlaybackMode, FearMark, FeedbackCode, PlaybackFeedback } from '@/types';
 import { generateId, decodeTreeFromUrl, encodeFeedbackCode, buildFeedbackCode, decodeFeedbackCode } from '@/utils';
-import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye, Copy, Check, User, Share2, CheckCircle, GraduationCap } from 'lucide-react';
+import { MessageSquare, Subtitles, Skull, ChevronRight, RotateCcw, BarChart3, X, Flame, Eye, Copy, Check, User, Share2, CheckCircle, GraduationCap, Play } from 'lucide-react';
 
 interface DisplayItem {
   type: 'node' | 'player-choice';
@@ -26,6 +26,10 @@ export default function PlaybackPage() {
   const [mode, setMode] = useState<PlaybackMode>('chat');
   const [showStats, setShowStats] = useState(false);
   const [showFeedbackBanner, setShowFeedbackBanner] = useState<'success' | null>(null);
+  const [showFeedbackConfirm, setShowFeedbackConfirm] = useState(false);
+  const [overlayReviewerName, setOverlayReviewerName] = useState('');
+  const [overlayMarkCount, setOverlayMarkCount] = useState(0);
+  const [overlayTopicId, setOverlayTopicId] = useState('');
 
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [visitedNodeIds, setVisitedNodeIds] = useState<string[]>([]);
@@ -85,6 +89,11 @@ export default function PlaybackPage() {
     return nodeMap[currentNodeId];
   }, [currentNodeId, nodeMap]);
 
+  const overlayTopic = useMemo(() => {
+    if (!overlayTopicId) return null;
+    return store.topics.find((t) => t.id === overlayTopicId) || null;
+  }, [overlayTopicId, store.topics]);
+
   const getStartingNodeId = useCallback((t: DialogueTree): string | null => {
     const sortedActs = [...t.acts].sort((a, b) => a.order - b.order);
     for (const act of sortedActs) {
@@ -142,6 +151,10 @@ export default function PlaybackPage() {
           setBannerTopicId(result.topicId || '');
           setBannerTreeId(result.treeId || '');
           setShowFeedbackBanner('success');
+          setOverlayReviewerName(result.reviewerName || '匿名同学');
+          setOverlayMarkCount(decodedFb.marks.length);
+          setOverlayTopicId(result.topicId || '');
+          setShowFeedbackConfirm(true);
           if (!dataParam && !treeId && decodedFb.treeSnapshot) {
             setTree(decodedFb.treeSnapshot);
             setIsSharedTree(true);
@@ -416,6 +429,27 @@ export default function PlaybackPage() {
 
   if (!tree) return null;
 
+  if (showFeedbackConfirm) {
+    return (
+      <FeedbackConfirmationOverlay
+        reviewerName={overlayReviewerName}
+        markCount={overlayMarkCount}
+        topicTitle={overlayTopic?.title || ''}
+        onWatchPlayback={() => setShowFeedbackConfirm(false)}
+        onGoToClassroom={() => {
+          setShowFeedbackConfirm(false);
+          const params = new URLSearchParams();
+          params.set('tab', 'classroom');
+          if (overlayTopicId) {
+            params.set('highlightTopic', overlayTopicId);
+          }
+          navigate(`/?${params.toString()}`);
+        }}
+        onClose={() => setShowFeedbackConfirm(false)}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-horror-bg flex flex-col">
       <TopBar
@@ -527,6 +561,83 @@ export default function PlaybackPage() {
             onClose={() => setShowStats(false)}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function FeedbackConfirmationOverlay({
+  reviewerName,
+  markCount,
+  topicTitle,
+  onWatchPlayback,
+  onGoToClassroom,
+  onClose,
+}: {
+  reviewerName: string;
+  markCount: number;
+  topicTitle: string;
+  onWatchPlayback: () => void;
+  onGoToClassroom: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.92)' }}>
+      <div className="max-w-md w-full mx-4 animate-fade-in animate-slide-in-up">
+        <div className="rounded-2xl border border-horror-border bg-horror-surface p-8 text-center shadow-2xl">
+          <h2 className="mb-6 font-creep text-4xl text-horror-rust animate-glow">
+            <CheckCircle className="mr-2 inline h-10 w-10" />
+            已收到反馈
+          </h2>
+
+          <p className="mb-6 flex items-center justify-center gap-2 text-lg text-horror-text">
+            <Skull className="h-5 w-5 text-horror-rust" />
+            <span className="font-medium">{reviewerName || '匿名同学'}</span>
+            {' '}标记了{' '}
+            <span className="font-bold text-horror-rust-light">{markCount}</span>
+            {' '}处恐惧点
+          </p>
+
+          <div className="mb-8 space-y-3 text-left">
+            <div className="flex items-center gap-3 text-sm text-horror-text">
+              <CheckCircle className="h-5 w-5 flex-shrink-0 text-green-500" />
+              <span>作品快照已自动恢复</span>
+            </div>
+            <div className="flex items-center gap-3 text-sm text-horror-text">
+              <CheckCircle className="h-5 w-5 flex-shrink-0 text-green-500" />
+              <span>已加入 <span className="font-medium text-horror-rust-light">{topicTitle}</span> 的作业批次</span>
+            </div>
+            <div className="flex items-center gap-3 text-sm text-horror-text">
+              <CheckCircle className="h-5 w-5 flex-shrink-0 text-green-500" />
+              <span>恐惧标记已入账</span>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <button
+              className="horror-btn-primary w-full flex items-center justify-center gap-2"
+              onClick={onWatchPlayback}
+            >
+              <Play className="h-4 w-4" />
+              查看作品回放
+              <ChevronRight className="h-4 w-4" />
+            </button>
+            <button
+              className="horror-btn w-full flex items-center justify-center gap-2 border-horror-rust/30 text-horror-rust-light hover:bg-horror-rust/10"
+              onClick={onGoToClassroom}
+            >
+              <GraduationCap className="h-4 w-4" />
+              去课堂作业包
+            </button>
+            <button
+              className="horror-btn-ghost w-full flex items-center justify-center gap-2"
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+              关闭
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

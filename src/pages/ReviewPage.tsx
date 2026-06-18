@@ -7,10 +7,30 @@ import {
 } from '@/types';
 import {
   ChevronLeft, BarChart3, Flame, Users, Trophy, Filter, Play, Eye, ArrowRight,
-  Calendar, BookOpen, Skull, Zap, TrendingUp, PieChart, CheckCircle, Copy
+  Calendar, BookOpen, Skull, Zap, TrendingUp, PieChart, CheckCircle, Copy, User
 } from 'lucide-react';
 
-type ReviewTab = 'ranking' | 'distribution' | 'champions';
+type ReviewTab = 'ranking' | 'distribution' | 'champions' | 'reviewers';
+
+interface ReviewerAggregate {
+  name: string;
+  feedbackCount: number;
+  totalMarks: number;
+  markedNodeIds: string[];
+  markedTrees: Array<{
+    treeId: string;
+    authorName: string;
+    marks: Array<{
+      nodeId: string;
+      nodeText: string;
+      actType: ActType;
+      markCount: number;
+      globalIndex: number;
+    }>;
+  }>;
+  firstPlayedAt: number;
+  lastPlayedAt: number;
+}
 
 export default function ReviewPage() {
   const { topicId } = useParams<{ topicId: string }>();
@@ -20,6 +40,7 @@ export default function ReviewPage() {
   const [activeTab, setActiveTab] = useState<ReviewTab>('ranking');
   const [actFilter, setActFilter] = useState<ActType | 'all'>('all');
   const [copied, setCopied] = useState(false);
+  const [selectedReviewer, setSelectedReviewer] = useState<string | null>(null);
 
   const topic = useMemo(() => {
     if (!topicId) return undefined;
@@ -171,6 +192,176 @@ export default function ReviewPage() {
         .slice(0, 3),
     }));
   }, [aggregatedRanking]);
+
+  const reviewerAggregates = useMemo<ReviewerAggregate[]>(() => {
+    const reviewerMap: Record<string, {
+      name: string;
+      feedbackCount: number;
+      totalMarks: number;
+      markedNodeIds: Set<string>;
+      treeMarks: Record<string, {
+        treeId: string;
+        authorName: string;
+        nodeMarks: Record<string, {
+          nodeId: string;
+          nodeText: string;
+          actType: ActType;
+          markCount: number;
+          globalIndex: number;
+        }>;
+      }>;
+      firstPlayedAt: number;
+      lastPlayedAt: number;
+    }> = {};
+
+    const globalNodeOrder: Record<string, number> = {};
+    let globalIndex = 0;
+    for (const tree of treesForTopic) {
+      for (const act of tree.acts) {
+        for (const node of act.nodes) {
+          globalNodeOrder[node.id] = globalIndex++;
+        }
+      }
+    }
+
+    for (const feedback of feedbacksForTopic) {
+      const reviewerName = feedback.reviewerName || '匿名同学';
+      let reviewer = reviewerMap[reviewerName];
+      if (!reviewer) {
+        reviewer = {
+          name: reviewerName,
+          feedbackCount: 0,
+          totalMarks: 0,
+          markedNodeIds: new Set(),
+          treeMarks: {},
+          firstPlayedAt: feedback.playedAt,
+          lastPlayedAt: feedback.playedAt,
+        };
+        reviewerMap[reviewerName] = reviewer;
+      }
+
+      reviewer.feedbackCount++;
+      reviewer.totalMarks += feedback.marks.length;
+      if (feedback.playedAt < reviewer.firstPlayedAt) {
+        reviewer.firstPlayedAt = feedback.playedAt;
+      }
+      if (feedback.playedAt > reviewer.lastPlayedAt) {
+        reviewer.lastPlayedAt = feedback.playedAt;
+      }
+
+      const tree = treesForTopic.find(t => t.id === feedback.treeId);
+      if (!tree) continue;
+
+      let treeEntry = reviewer.treeMarks[tree.id];
+      if (!treeEntry) {
+        treeEntry = {
+          treeId: tree.id,
+          authorName: tree.authorName || '匿名作者',
+          nodeMarks: {},
+        };
+        reviewer.treeMarks[tree.id] = treeEntry;
+      }
+
+      for (const mark of feedback.marks) {
+        reviewer.markedNodeIds.add(mark.nodeId);
+
+        let nodeInfo = treeEntry.nodeMarks[mark.nodeId];
+        if (!nodeInfo) {
+          let nodeText = '';
+          let actType: ActType = 'opening';
+          let nodeGlobalIndex = globalNodeOrder[mark.nodeId] ?? 0;
+
+          for (const act of tree.acts) {
+            const node = act.nodes.find(n => n.id === mark.nodeId);
+            if (node) {
+              nodeText = node.content;
+              actType = act.type;
+              break;
+            }
+          }
+
+          if (!nodeText) continue;
+
+          nodeInfo = {
+            nodeId: mark.nodeId,
+            nodeText,
+            actType,
+            markCount: 0,
+            globalIndex: nodeGlobalIndex,
+          };
+          treeEntry.nodeMarks[mark.nodeId] = nodeInfo;
+        }
+        nodeInfo.markCount++;
+      }
+    }
+
+    return Object.values(reviewerMap).map(reviewer => ({
+      name: reviewer.name,
+      feedbackCount: reviewer.feedbackCount,
+      totalMarks: reviewer.totalMarks,
+      markedNodeIds: Array.from(reviewer.markedNodeIds),
+      markedTrees: Object.values(reviewer.treeMarks).map(treeEntry => ({
+        treeId: treeEntry.treeId,
+        authorName: treeEntry.authorName,
+        marks: Object.values(treeEntry.nodeMarks).sort((a, b) => a.globalIndex - b.globalIndex),
+      })),
+      firstPlayedAt: reviewer.firstPlayedAt,
+      lastPlayedAt: reviewer.lastPlayedAt,
+    })).sort((a, b) => b.totalMarks - a.totalMarks);
+  }, [feedbacksForTopic, treesForTopic]);
+
+  const classAverageMarks = useMemo(() => {
+    if (reviewerAggregates.length === 0) return 0;
+    return reviewerAggregates.reduce((sum, r) => sum + r.totalMarks, 0) / reviewerAggregates.length;
+  }, [reviewerAggregates]);
+
+  const classMostFearedAct = useMemo(() => {
+    const actCounts: Record<ActType, number> = { opening: 0, anomaly: 0, collapse: 0 };
+    for (const item of aggregatedRanking) {
+      actCounts[item.actType] += item.markCount;
+    }
+    const acts: ActType[] = ['opening', 'anomaly', 'collapse'];
+    return acts.reduce((a, b) => actCounts[a] > actCounts[b] ? a : b);
+  }, [aggregatedRanking]);
+
+  const currentReviewer = useMemo(() => {
+    if (!selectedReviewer) return null;
+    return reviewerAggregates.find(r => r.name === selectedReviewer) || null;
+  }, [selectedReviewer, reviewerAggregates]);
+
+  const formatDate = (ts: number) => {
+    return new Date(ts).toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const reviewerInsight = useMemo(() => {
+    if (!currentReviewer) return null;
+
+    const pctDiff = classAverageMarks > 0
+      ? Math.round(((currentReviewer.totalMarks - classAverageMarks) / classAverageMarks) * 100)
+      : 0;
+
+    const reviewerActCounts: Record<ActType, number> = { opening: 0, anomaly: 0, collapse: 0 };
+    for (const tree of currentReviewer.markedTrees) {
+      for (const mark of tree.marks) {
+        reviewerActCounts[mark.actType] += mark.markCount;
+      }
+    }
+    const acts: ActType[] = ['opening', 'anomaly', 'collapse'];
+    const reviewerMostFearedAct = acts.reduce((a, b) => reviewerActCounts[a] > reviewerActCounts[b] ? a : b);
+    const mostFearedMatch = reviewerMostFearedAct === classMostFearedAct;
+
+    return {
+      pctDiff,
+      reviewerMostFearedAct,
+      mostFearedMatch,
+    };
+  }, [currentReviewer, classAverageMarks, classMostFearedAct]);
 
   const copyTopicUrl = () => {
     if (!topicId) return;
@@ -416,7 +607,40 @@ export default function ReviewPage() {
               >
                 🏆 各幕冠军
               </button>
+              <button
+                className={`px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                  activeTab === 'reviewers'
+                    ? 'text-horror-rust border-horror-rust'
+                    : 'text-horror-muted border-transparent hover:text-horror-text'
+                }`}
+                onClick={() => {
+                  setActiveTab('reviewers');
+                  if (reviewerAggregates.length > 0 && !selectedReviewer) {
+                    setSelectedReviewer(reviewerAggregates[0].name);
+                  }
+                }}
+              >
+                👥 按评审人查看
+              </button>
             </div>
+
+            {activeTab === 'reviewers' && reviewerAggregates.length > 0 && (
+              <div className="mb-6 flex flex-wrap gap-2">
+                {reviewerAggregates.map(reviewer => (
+                  <button
+                    key={reviewer.name}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      selectedReviewer === reviewer.name
+                        ? 'bg-horror-rust text-white'
+                        : 'text-horror-muted hover:text-horror-text hover:bg-horror-card-hover'
+                    }`}
+                    onClick={() => setSelectedReviewer(reviewer.name)}
+                  >
+                    👤 {reviewer.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {activeTab === 'ranking' && (
               <div className="space-y-4 animate-slide-in-up">
@@ -627,6 +851,137 @@ export default function ReviewPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {activeTab === 'reviewers' && (
+              <div className="space-y-6 animate-slide-in-up">
+                {!currentReviewer ? (
+                  <div className="horror-card text-center py-8 text-horror-muted">
+                    请选择一位评审人查看详情
+                  </div>
+                ) : (
+                  <>
+                    <div className="horror-card">
+                      <div className="flex items-start gap-3 mb-4">
+                        <div className="shrink-0 w-12 h-12 rounded-full bg-horror-rust/20 flex items-center justify-center">
+                          <User className="h-6 w-6 text-horror-rust" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <h2 className="text-xl font-bold text-horror-text mb-2">
+                            👤 {currentReviewer.name}
+                          </h2>
+                          <div className="flex flex-wrap items-center gap-4 text-sm text-horror-muted">
+                            <span className="inline-flex items-center gap-1">
+                              <Eye className="h-4 w-4" />
+                              反馈数: {currentReviewer.feedbackCount}
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <Flame className="h-4 w-4 text-horror-rust" />
+                              总标记: {currentReviewer.totalMarks}
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <Calendar className="h-4 w-4" />
+                              首次体验: {formatDate(currentReviewer.firstPlayedAt)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {currentReviewer.markedTrees.map((tree, treeIdx) => {
+                      const prevTrees = currentReviewer.markedTrees.slice(0, treeIdx);
+                      const prevCount = prevTrees.reduce((sum, t) => sum + t.marks.length, 0);
+                      return (
+                        <div key={tree.treeId} className="horror-card">
+                          <div className="flex items-center gap-2 mb-4">
+                            <Eye className="h-4 w-4 text-horror-rust" />
+                            <span className="font-medium text-horror-text">
+                              作品作者: {tree.authorName}
+                            </span>
+                          </div>
+
+                          <div className="mb-4 text-xs text-horror-muted">
+                            标记的对白列表:
+                          </div>
+
+                          <div className="space-y-3 mb-4">
+                            {tree.marks.map((mark, markIdx) => (
+                              <div
+                                key={mark.nodeId}
+                                className="p-3 rounded-lg bg-horror-card-hover/30 border border-horror-border/30"
+                              >
+                                <div className="flex flex-wrap items-center gap-2 mb-2">
+                                  <span className="text-xs text-horror-muted font-mono">
+                                    #{prevCount + markIdx + 1}
+                                  </span>
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${getActColorClass(mark.actType)}`}>
+                                    {ACT_LABELS[mark.actType]}
+                                  </span>
+                                </div>
+                                <div className="font-mono text-sm text-horror-text/90 mb-3 whitespace-pre-wrap leading-relaxed">
+                                  {mark.nodeText}
+                                </div>
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-horror-rust/20 text-[11px] text-horror-rust">
+                                    <Flame className="h-3 w-3" />
+                                    标记 {mark.markCount} 次
+                                  </span>
+                                  <button
+                                    className="inline-flex items-center gap-1 text-xs text-horror-rust hover:text-horror-rust/80 transition-colors"
+                                    onClick={() => navigate(`/stats/${tree.treeId}?node=${mark.nodeId}`)}
+                                  >
+                                    查看该节点
+                                    <ArrowRight className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <button
+                            className="horror-btn-primary w-full text-sm flex items-center justify-center gap-2"
+                            onClick={() => navigate(`/stats/${tree.treeId}`)}
+                          >
+                            <BarChart3 className="h-4 w-4" />
+                            📊 查看完整作品统计
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {reviewerInsight && (
+                      <div className="horror-card border border-horror-rust/30 bg-horror-rust/5">
+                        <div className="flex items-center gap-2 mb-3">
+                          <Zap className="h-5 w-5 text-horror-rust" />
+                          <span className="font-medium text-horror-text">
+                            评审洞察
+                          </span>
+                        </div>
+                        <div className="space-y-2 text-sm text-horror-text/90">
+                          {reviewerInsight.pctDiff > 0 ? (
+                            <p>
+                              <TrendingUp className="h-4 w-4 inline mr-1 text-green-400" />
+                              标记数高于班级平均 {reviewerInsight.pctDiff}%，对恐怖细节更敏感
+                            </p>
+                          ) : reviewerInsight.pctDiff < 0 ? (
+                            <p>
+                              <TrendingUp className="h-4 w-4 inline mr-1 text-yellow-400 rotate-180" />
+                              标记数低于班级平均 {Math.abs(reviewerInsight.pctDiff)}%，可能需要更强烈的恐惧触发
+                            </p>
+                          ) : (
+                            <p>
+                              标记数与班级平均持平
+                            </p>
+                          )}
+                          <p>
+                            最恐惧幕: {ACT_LABELS[reviewerInsight.reviewerMostFearedAct]} — 与班级{reviewerInsight.mostFearedMatch ? '一致' : '不同'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </>
